@@ -11,6 +11,10 @@
           "format": "hostname",
           "description": "Global Docker image registry"
         },
+        "prefix": {
+          "type": "string",
+          "description": "Prefix for images to apply the global registry to (e.g., 'simstudioai/'); if not set, global registry will only be applied to simstudioai/* images"
+        },
         "useRegistryForAllImages": {
           "type": "boolean",
           "description": "Use registry for all images, not just simstudioai/* images"

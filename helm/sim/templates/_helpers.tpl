@@ -147,7 +147,7 @@ Usage: {{ include "sim.image" (dict "context" . "image" .Values.app.image) }}
 {{- $tag := .image.tag | toString -}}
 {{- /* Use global registry for simstudioai images or when explicitly set for all images */ -}}
 {{- if .context.Values.global.imageRegistry -}}
-  {{- if or (hasPrefix "simstudioai/" $repository) .context.Values.global.useRegistryForAllImages -}}
+  {{- if or (hasPrefix .Values.global.prefix $repository) .context.Values.global.useRegistryForAllImages -}}
     {{- $registry = .context.Values.global.imageRegistry -}}
   {{- end -}}
 {{- end -}}
