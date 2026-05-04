@@ -1,12 +1,14 @@
 import { db } from '@sim/db'
 import { chat } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
+import { authorizeWorkflowByWorkspacePermission } from '@sim/workflow-authz'
 import { and, eq, isNull } from 'drizzle-orm'
 import type { NextRequest } from 'next/server'
+import { getChatDeploymentStatusContract } from '@/lib/api/contracts/deployments'
+import { parseRequest } from '@/lib/api/server'
 import { checkSessionOrInternalAuth } from '@/lib/auth/hybrid'
 import { generateRequestId } from '@/lib/core/utils/request'
 import { withRouteHandler } from '@/lib/core/utils/with-route-handler'
-import { authorizeWorkflowByWorkspacePermission } from '@/lib/workflows/utils'
 import { createErrorResponse, createSuccessResponse } from '@/app/api/workflows/utils'
 
 const logger = createLogger('ChatStatusAPI')
@@ -15,8 +17,10 @@ const logger = createLogger('ChatStatusAPI')
  * GET endpoint to check if a workflow has an active chat deployment
  */
 export const GET = withRouteHandler(
-  async (request: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
-    const { id } = await params
+  async (request: NextRequest, context: { params: Promise<{ id: string }> }) => {
+    const parsed = await parseRequest(getChatDeploymentStatusContract, request, context)
+    if (!parsed.success) return parsed.response
+    const { id } = parsed.data.params
     const requestId = generateRequestId()
 
     try {

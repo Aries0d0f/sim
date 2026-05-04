@@ -18,6 +18,20 @@ import type { SerializableExecutionState } from '@/executor/execution/types'
 
 const logger = createLogger('useExecutionStream')
 
+export class ExecutionStreamHttpError extends Error {
+  constructor(
+    message: string,
+    public readonly httpStatus: number
+  ) {
+    super(message)
+    this.name = 'ExecutionStreamHttpError'
+  }
+}
+
+export function isExecutionStreamHttpError(error: unknown): error is ExecutionStreamHttpError {
+  return error instanceof ExecutionStreamHttpError
+}
+
 /**
  * Detects errors caused by the browser killing a fetch (page refresh, navigation, tab close).
  * These should be treated as clean disconnects, not execution errors.
@@ -194,6 +208,7 @@ export function useExecutionStream() {
     sharedAbortControllers.set(workflowId, abortController)
 
     try {
+      // boundary-raw-fetch: workflow execute endpoint returns an SSE stream consumed via response.body.getReader() and processSSEStream; also reads the X-Execution-Id response header
       const response = await fetch(`/api/workflows/${workflowId}/execute`, {
         method: 'POST',
         headers: {
@@ -204,12 +219,22 @@ export function useExecutionStream() {
       })
 
       if (!response.ok) {
-        const errorResponse = await response.json()
-        const error = new Error(errorResponse.error || 'Failed to start execution')
+        let errorResponse: any
+        try {
+          errorResponse = await response.json()
+        } catch {
+          throw new ExecutionStreamHttpError(
+            `Server error (${response.status}): ${response.statusText}`,
+            response.status
+          )
+        }
+        const error = new ExecutionStreamHttpError(
+          errorResponse.error || 'Failed to start execution',
+          response.status
+        )
         if (errorResponse && typeof errorResponse === 'object') {
           Object.assign(error, { executionResult: errorResponse })
         }
-        Object.assign(error, { httpStatus: response.status })
         throw error
       }
 
@@ -261,6 +286,7 @@ export function useExecutionStream() {
     sharedAbortControllers.set(workflowId, abortController)
 
     try {
+      // boundary-raw-fetch: run-from-block endpoint returns an SSE stream consumed via response.body.getReader() and processSSEStream; also reads the X-Execution-Id response header
       const response = await fetch(`/api/workflows/${workflowId}/execute`, {
         method: 'POST',
         headers: {
@@ -279,15 +305,18 @@ export function useExecutionStream() {
         try {
           errorResponse = await response.json()
         } catch {
-          const error = new Error(`Server error (${response.status}): ${response.statusText}`)
-          Object.assign(error, { httpStatus: response.status })
-          throw error
+          throw new ExecutionStreamHttpError(
+            `Server error (${response.status}): ${response.statusText}`,
+            response.status
+          )
         }
-        const error = new Error(errorResponse.error || 'Failed to start execution')
+        const error = new ExecutionStreamHttpError(
+          errorResponse.error || 'Failed to start execution',
+          response.status
+        )
         if (errorResponse && typeof errorResponse === 'object') {
           Object.assign(error, { executionResult: errorResponse })
         }
-        Object.assign(error, { httpStatus: response.status })
         throw error
       }
 
@@ -331,11 +360,14 @@ export function useExecutionStream() {
     const abortController = new AbortController()
     sharedAbortControllers.set(workflowId, abortController)
     try {
+      // boundary-raw-fetch: execution reconnect endpoint returns an SSE stream consumed via response.body.getReader() and processSSEStream
       const response = await fetch(
         `/api/workflows/${workflowId}/executions/${executionId}/stream?from=${fromEventId}`,
         { signal: abortController.signal }
       )
-      if (!response.ok) throw new Error(`Reconnect failed (${response.status})`)
+      if (!response.ok) {
+        throw new ExecutionStreamHttpError(`Reconnect failed (${response.status})`, response.status)
+      }
       if (!response.body) throw new Error('No response body')
 
       await processSSEStream(response.body.getReader(), callbacks, 'Reconnect')

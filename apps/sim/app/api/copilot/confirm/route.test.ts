@@ -189,8 +189,9 @@ describe('Copilot Confirm API Route', () => {
     )
 
     expect(acceptedResponse.status).toBe(400)
-    expect(await acceptedResponse.json()).toEqual({
+    expect(await acceptedResponse.json()).toMatchObject({
       error: 'Invalid request data: Invalid notification status',
+      details: expect.any(Array),
     })
 
     const rejectedResponse = await POST(
@@ -201,12 +202,13 @@ describe('Copilot Confirm API Route', () => {
     )
 
     expect(rejectedResponse.status).toBe(400)
-    expect(await rejectedResponse.json()).toEqual({
+    expect(await rejectedResponse.json()).toMatchObject({
       error: 'Invalid request data: Invalid notification status',
+      details: expect.any(Array),
     })
   })
 
-  it('returns 400 when the durable write fails before publish', async () => {
+  it('returns 500 when the durable write fails before publish', async () => {
     completeAsyncToolCall.mockRejectedValueOnce(new Error('db down'))
 
     const response = await POST(
@@ -216,7 +218,7 @@ describe('Copilot Confirm API Route', () => {
       })
     )
 
-    expect(response.status).toBe(400)
+    expect(response.status).toBe(500)
     expect(publishToolConfirmation).not.toHaveBeenCalled()
   })
 })

@@ -25,6 +25,7 @@ export const env = createEnv({
     ALLOWED_LOGIN_EMAILS:                  z.string().optional(),                  // Comma-separated list of allowed email addresses for login
     ALLOWED_LOGIN_DOMAINS:                 z.string().optional(),                  // Comma-separated list of allowed email domains for login
     BLOCKED_SIGNUP_DOMAINS:                z.string().optional(),                  // Comma-separated list of email domains blocked from signing up (e.g., "gmail.com,yahoo.com")
+    TRUSTED_ORIGINS:                       z.string().optional(),                  // Comma-separated additional origins to trust for auth (e.g., "https://app.example.com,https://www.example.com"). Merged into Better Auth trustedOrigins.
     TURNSTILE_SECRET_KEY:                  z.string().min(1).optional(),           // Cloudflare Turnstile secret key for captcha verification
     SIGNUP_EMAIL_VALIDATION_ENABLED:       z.boolean().optional(),                 // Enable disposable email blocking via better-auth-harmony (55K+ domains)
     ENCRYPTION_KEY:                        z.string().min(32),                     // Key for encrypting sensitive data
@@ -58,6 +59,16 @@ export const env = createEnv({
     ENTERPRISE_TIER_COST_LIMIT:            z.number().optional(),                  // Cost limit for enterprise tier users
     ENTERPRISE_STORAGE_LIMIT_GB:           z.number().optional().default(500),     // Default storage limit in GB for enterprise tier (can be overridden per org)
     BILLING_ENABLED:                       z.boolean().optional(),                 // Enable billing enforcement and usage tracking
+
+    // Table feature limits (per plan). Apply when billing is disabled (free tier defaults) or for billed plans.
+    FREE_TABLES_LIMIT:                     z.number().optional(),                  // Max user tables per workspace on free tier (default: 3)
+    FREE_TABLE_ROWS_LIMIT:                 z.number().optional(),                  // Max rows per table on free tier (default: 1000)
+    PRO_TABLES_LIMIT:                      z.number().optional(),                  // Max user tables per workspace on pro tier (default: 25)
+    PRO_TABLE_ROWS_LIMIT:                  z.number().optional(),                  // Max rows per table on pro tier (default: 5000)
+    TEAM_TABLES_LIMIT:                     z.number().optional(),                  // Max user tables per workspace on team tier (default: 100)
+    TEAM_TABLE_ROWS_LIMIT:                 z.number().optional(),                  // Max rows per table on team tier (default: 10000)
+    ENTERPRISE_TABLES_LIMIT:               z.number().optional(),                  // Max user tables per workspace on enterprise tier (default: 10000)
+    ENTERPRISE_TABLE_ROWS_LIMIT:           z.number().optional(),                  // Max rows per table on enterprise tier (default: 1000000)
 
     // Credit-tier Stripe prices (monthly)
     STRIPE_PRICE_TIER_25_MO:               z.string().min(1).optional(),           // Pro: $25/mo (6,000 credits)
@@ -96,6 +107,7 @@ export const env = createEnv({
     ANTHROPIC_API_KEY_1:                   z.string().min(1).optional(),           // Primary Anthropic Claude API key
     ANTHROPIC_API_KEY_2:                   z.string().min(1).optional(),           // Additional Anthropic API key for load balancing
     ANTHROPIC_API_KEY_3:                   z.string().min(1).optional(),           // Additional Anthropic API key for load balancing
+    GEMINI_API_KEY:                        z.string().min(1).optional(),           // Singular Gemini API key (used as fallback when rotation keys are unset)
     GEMINI_API_KEY_1:                      z.string().min(1).optional(),           // Primary Gemini API key
     GEMINI_API_KEY_2:                      z.string().min(1).optional(),           // Additional Gemini API key for load balancing
     GEMINI_API_KEY_3:                      z.string().min(1).optional(),           // Additional Gemini API key for load balancing
@@ -103,6 +115,10 @@ export const env = createEnv({
     VLLM_BASE_URL:                         z.string().url().optional(),            // vLLM self-hosted base URL (OpenAI-compatible)
     VLLM_API_KEY:                          z.string().optional(),                  // Optional bearer token for vLLM
     FIREWORKS_API_KEY:                     z.string().optional(),                  // Optional Fireworks AI API key for model listing
+    COHERE_API_KEY:                        z.string().min(1).optional(),           // Cohere API key for reranker (rerank-v4.0-pro, rerank-v4.0-fast, rerank-v3.5)
+    COHERE_API_KEY_1:                      z.string().min(1).optional(),           // Primary Cohere API key for rotation
+    COHERE_API_KEY_2:                      z.string().min(1).optional(),           // Additional Cohere API key for load balancing
+    COHERE_API_KEY_3:                      z.string().min(1).optional(),           // Additional Cohere API key for load balancing
     ELEVENLABS_API_KEY:                    z.string().min(1).optional(),           // ElevenLabs API key for text-to-speech in deployed chat
     SERPER_API_KEY:                        z.string().min(1).optional(),           // Serper API key for online search
     EXA_API_KEY:                           z.string().min(1).optional(),           // Exa AI API key for enhanced online search
@@ -118,7 +134,8 @@ export const env = createEnv({
     AZURE_ANTHROPIC_ENDPOINT:              z.string().url().optional(),            // Azure Anthropic service endpoint
     AZURE_ANTHROPIC_API_KEY:               z.string().min(1).optional(),           // Azure Anthropic API key
     AZURE_ANTHROPIC_API_VERSION:           z.string().min(1).optional(),           // Azure Anthropic API version (e.g. 2023-06-01)
-    KB_OPENAI_MODEL_NAME:                  z.string().optional(),                  // Knowledge base OpenAI model name (works with both regular OpenAI and Azure OpenAI)
+    KB_OPENAI_MODEL_NAME:                  z.string().optional(),                  // Azure deployment name serving the configured KB embedding model (used only when AZURE_OPENAI_* credentials are set).
+    KB_EMBEDDING_MODEL:                    z.string().optional(),                  // Embedding model used for all new knowledge bases. Must be one of the supported model ids; defaults to text-embedding-3-small.
     WAND_OPENAI_MODEL_NAME:                z.string().optional(),                  // Wand generation OpenAI model name (works with both regular OpenAI and Azure OpenAI)
     OCR_AZURE_ENDPOINT:                    z.string().url().optional(),            // Azure Mistral OCR service endpoint
     OCR_AZURE_MODEL_NAME:                  z.string().optional(),                  // Azure Mistral OCR model name for document processing
@@ -248,7 +265,6 @@ export const env = createEnv({
 
     // Real-time Communication
     SOCKET_SERVER_URL:                     z.string().url().optional(),            // WebSocket server URL for real-time features
-    SOCKET_PORT:                           z.number().optional(),                  // Port for WebSocket server
     PORT:                                  z.number().optional(),                  // Main application port
     INTERNAL_API_BASE_URL:                 z.string().optional(),                  // Optional internal base URL for server-side self-calls; must include protocol if set (e.g., http://sim-app.namespace.svc.cluster.local:3000)
     ALLOWED_ORIGINS:                       z.string().optional(),                  // CORS allowed origins
@@ -498,3 +514,27 @@ export const isFalsy = (value: string | boolean | number | undefined) =>
   typeof value === 'string' ? value.toLowerCase() === 'false' || value === '0' : value === false
 
 export { getEnv }
+
+/**
+ * Coerce an env-derived value to a finite number ≥ `min`, falling back to the
+ * provided default when the value is unset, empty, non-finite, or below `min`.
+ * `min` defaults to `0` so configs like `KB_CONFIG_DELAY_BETWEEN_BATCHES=0`
+ * (meaning "no delay / max throughput") are honored. Pass `min: 1` for configs
+ * where zero is invalid (e.g. Redis TTLs, capacity limits).
+ *
+ * `createEnv` is configured with `skipValidation: true`, so values declared as
+ * `z.number()` arrive as raw strings when sourced from `process.env` or Helm.
+ * Use this helper anywhere a numeric env override is consumed to normalize the
+ * type at the boundary instead of relying on JS implicit coercion.
+ */
+export function envNumber(
+  value: number | string | undefined | null,
+  fallback: number,
+  options: { min?: number } = {}
+): number {
+  const min = options.min ?? 0
+  if (typeof value === 'number' && Number.isFinite(value) && value >= min) return value
+  if (value === undefined || value === null || value === '') return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= min ? parsed : fallback
+}

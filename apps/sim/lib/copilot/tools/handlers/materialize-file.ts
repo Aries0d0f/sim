@@ -1,14 +1,14 @@
+import { AuditAction, AuditResourceType, recordAudit } from '@sim/audit'
 import { db } from '@sim/db'
 import { workflow, workspaceFiles } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
 import { generateId } from '@sim/utils/id'
 import { and, eq, isNull } from 'drizzle-orm'
-import { AuditAction, AuditResourceType, recordAudit } from '@/lib/audit/log'
 import type { ExecutionContext, ToolCallResult } from '@/lib/copilot/request/types'
 import { findMothershipUploadRowByChatAndName } from '@/lib/copilot/tools/handlers/upload-file-reader'
 import { getServePathPrefix } from '@/lib/uploads'
-import { downloadWorkspaceFile } from '@/lib/uploads/contexts/workspace/workspace-file-manager'
+import { fetchWorkspaceFileBuffer } from '@/lib/uploads/contexts/workspace/workspace-file-manager'
 import { parseWorkflowJson } from '@/lib/workflows/operations/import-export'
 import { saveWorkflowToNormalizedTables } from '@/lib/workflows/persistence/utils'
 import { deduplicateWorkflowName } from '@/lib/workflows/utils'
@@ -29,6 +29,7 @@ function toFileRecord(row: typeof workspaceFiles.$inferSelect) {
     uploadedBy: row.userId,
     deletedAt: row.deletedAt,
     uploadedAt: row.uploadedAt,
+    updatedAt: row.updatedAt,
     storageContext: 'mothership' as const,
   }
 }
@@ -82,7 +83,7 @@ async function executeImport(
     }
   }
 
-  const buffer = await downloadWorkspaceFile(toFileRecord(row))
+  const buffer = await fetchWorkspaceFileBuffer(toFileRecord(row))
   const content = buffer.toString('utf-8')
 
   let parsed: unknown

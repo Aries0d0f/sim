@@ -1,3 +1,4 @@
+import { generateId } from '@sim/utils/id'
 import {
   MothershipStreamV1CompletionStatus,
   MothershipStreamV1EventType,
@@ -38,6 +39,9 @@ export interface PersistedContentBlock {
   status?: MothershipStreamV1CompletionStatus
   content?: string
   toolCall?: PersistedToolCall
+  timestamp?: number
+  endedAt?: number
+  parentToolCallId?: string
 }
 
 export interface PersistedFileAttachment {
@@ -85,7 +89,32 @@ function resolveToolState(block: ContentBlock): PersistedToolState {
   return tc.status as PersistedToolState
 }
 
+/**
+ * Copy `timestamp` / `endedAt` from a source object onto a target object.
+ * Shared by every block mapper (persist, display, snapshot) so the timing
+ * metadata that drives the `Thought for Ns` chip survives the full
+ * persist → normalize → display round-trip — and one rule lives in one place.
+ */
+export function withBlockTiming<T>(target: T, src: { timestamp?: number; endedAt?: number }): T {
+  const writable = target as { timestamp?: number; endedAt?: number }
+  if (typeof src.timestamp === 'number') writable.timestamp = src.timestamp
+  if (typeof src.endedAt === 'number') writable.endedAt = src.endedAt
+  return target
+}
+
+function withBlockParent<T>(target: T, src: { parentToolCallId?: string }): T {
+  if (src.parentToolCallId) {
+    ;(target as { parentToolCallId?: string }).parentToolCallId = src.parentToolCallId
+  }
+  return target
+}
+
 function mapContentBlock(block: ContentBlock): PersistedContentBlock {
+  const persisted = mapContentBlockBody(block)
+  return withBlockParent(withBlockTiming(persisted, block), block)
+}
+
+function mapContentBlockBody(block: ContentBlock): PersistedContentBlock {
   switch (block.type) {
     case 'text':
       return {
@@ -171,7 +200,7 @@ export function buildPersistedAssistantMessage(
   requestId?: string
 ): PersistedMessage {
   const message: PersistedMessage = {
-    id: crypto.randomUUID(),
+    id: generateId(),
     role: 'assistant',
     content: result.content,
     timestamp: new Date().toISOString(),
@@ -242,6 +271,9 @@ interface RawBlock {
   kind?: string
   lifecycle?: string
   status?: string
+  timestamp?: number
+  endedAt?: number
+  parentToolCallId?: string
   toolCall?: {
     id?: string
     name?: string
@@ -298,6 +330,7 @@ function normalizeCanonicalBlock(block: RawBlock): PersistedContentBlock {
   if (block.kind) result.kind = block.kind as MothershipStreamV1SpanPayloadKind
   if (block.lifecycle) result.lifecycle = block.lifecycle as MothershipStreamV1SpanLifecycleEvent
   if (block.status) result.status = block.status as MothershipStreamV1CompletionStatus
+  if (block.parentToolCallId) result.parentToolCallId = block.parentToolCallId
   if (block.toolCall) {
     result.toolCall = {
       id: block.toolCall.id ?? '',
@@ -406,7 +439,19 @@ function normalizeLegacyBlock(block: RawBlock): PersistedContentBlock {
 }
 
 function normalizeBlock(block: RawBlock): PersistedContentBlock {
-  return isCanonicalBlock(block) ? normalizeCanonicalBlock(block) : normalizeLegacyBlock(block)
+  const result = isCanonicalBlock(block)
+    ? normalizeCanonicalBlock(block)
+    : normalizeLegacyBlock(block)
+  if (typeof block.timestamp === 'number' && result.timestamp === undefined) {
+    result.timestamp = block.timestamp
+  }
+  if (typeof block.endedAt === 'number' && result.endedAt === undefined) {
+    result.endedAt = block.endedAt
+  }
+  if (block.parentToolCallId && result.parentToolCallId === undefined) {
+    result.parentToolCallId = block.parentToolCallId
+  }
+  return result
 }
 
 function normalizeLegacyToolCall(tc: LegacyToolCall): PersistedContentBlock {
@@ -457,7 +502,7 @@ function normalizeBlocks(rawBlocks: RawBlock[], messageContent: string): Persist
 
 export function normalizeMessage(raw: Record<string, unknown>): PersistedMessage {
   const msg: PersistedMessage = {
-    id: (raw.id as string) ?? crypto.randomUUID(),
+    id: (raw.id as string) ?? generateId(),
     role: (raw.role as 'user' | 'assistant') ?? 'assistant',
     content: (raw.content as string) ?? '',
     timestamp: (raw.timestamp as string) ?? new Date().toISOString(),

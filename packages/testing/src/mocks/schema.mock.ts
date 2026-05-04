@@ -331,6 +331,7 @@ export const schemaMock = {
     createdBy: 'createdBy',
     name: 'name',
     key: 'key',
+    keyHash: 'keyHash',
     type: 'type',
     lastUsed: 'lastUsed',
     createdAt: 'createdAt',
@@ -467,6 +468,7 @@ export const schemaMock = {
     createdAt: 'createdAt',
   },
   invitationKindEnum: { enumValues: ['organization', 'workspace'] as const },
+  invitationMembershipIntentEnum: { enumValues: ['internal', 'external'] as const },
   invitationStatusEnum: {
     enumValues: ['pending', 'accepted', 'rejected', 'cancelled', 'expired'] as const,
   },
@@ -476,6 +478,7 @@ export const schemaMock = {
     email: 'email',
     inviterId: 'inviterId',
     organizationId: 'organizationId',
+    membershipIntent: 'membershipIntent',
     role: 'role',
     status: 'status',
     token: 'token',

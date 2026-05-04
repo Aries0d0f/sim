@@ -2,12 +2,12 @@
  * @vitest-environment node
  */
 import { hybridAuthMockFns, workflowsUtilsMock, workflowsUtilsMockFns } from '@sim/testing'
-import type { NextRequest } from 'next/server'
+import { NextRequest } from 'next/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { mockGetJobQueue, mockVerifyWorkflowAccess, mockGetJob } = vi.hoisted(() => ({
+const { mockGetJobQueue, mockAuthorizeWorkflow, mockGetJob } = vi.hoisted(() => ({
   mockGetJobQueue: vi.fn(),
-  mockVerifyWorkflowAccess: vi.fn(),
+  mockAuthorizeWorkflow: vi.fn(),
   mockGetJob: vi.fn(),
 }))
 
@@ -15,8 +15,8 @@ vi.mock('@/lib/core/async-jobs', () => ({
   getJobQueue: mockGetJobQueue,
 }))
 
-vi.mock('@/socket/middleware/permissions', () => ({
-  verifyWorkflowAccess: mockVerifyWorkflowAccess,
+vi.mock('@sim/workflow-authz', () => ({
+  authorizeWorkflowByWorkspacePermission: mockAuthorizeWorkflow,
 }))
 
 vi.mock('@/lib/workflows/utils', () => workflowsUtilsMock)
@@ -24,11 +24,7 @@ vi.mock('@/lib/workflows/utils', () => workflowsUtilsMock)
 import { GET } from './route'
 
 function createMockRequest(): NextRequest {
-  return {
-    headers: {
-      get: () => null,
-    },
-  } as NextRequest
+  return new NextRequest(new URL('http://localhost:3000/api/jobs/test'))
 }
 
 describe('GET /api/jobs/[jobId]', () => {
@@ -42,7 +38,7 @@ describe('GET /api/jobs/[jobId]', () => {
       workspaceId: undefined,
     })
 
-    mockVerifyWorkflowAccess.mockResolvedValue({ hasAccess: true })
+    mockAuthorizeWorkflow.mockResolvedValue({ allowed: true, status: 200 })
     workflowsUtilsMockFns.mockGetWorkflowById.mockResolvedValue({
       id: 'workflow-1',
       workspaceId: 'workspace-1',

@@ -4,6 +4,7 @@
  */
 
 import { createLogger } from '@sim/logger'
+import { mergeSubblockStateWithValues } from '@sim/workflow-persistence/subblocks'
 import type { Edge } from 'reactflow'
 import { z } from 'zod'
 import { getPersonalAndWorkspaceEnv } from '@/lib/environment/utils'
@@ -14,7 +15,6 @@ import {
   loadDeployedWorkflowState,
   loadWorkflowFromNormalizedTables,
 } from '@/lib/workflows/persistence/utils'
-import { mergeSubblockStateWithValues } from '@/lib/workflows/subblocks'
 import { TriggerUtils } from '@/lib/workflows/triggers/triggers'
 import { updateWorkflowRunCounts } from '@/lib/workflows/utils'
 import { Executor } from '@/executor'
@@ -33,7 +33,7 @@ import { Serializer } from '@/serializer'
 
 const logger = createLogger('ExecutionCore')
 
-const EnvVarsSchema = z.record(z.string())
+const EnvVarsSchema = z.record(z.string(), z.string())
 
 export interface ExecuteWorkflowCoreOptions {
   snapshot: ExecutionSnapshot

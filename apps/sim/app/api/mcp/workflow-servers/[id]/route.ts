@@ -1,10 +1,14 @@
+import { AuditAction, AuditResourceType, recordAudit } from '@sim/audit'
 import { db } from '@sim/db'
 import { workflowMcpServer, workflowMcpTool } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
 import { and, eq, isNull } from 'drizzle-orm'
 import type { NextRequest } from 'next/server'
-import { AuditAction, AuditResourceType, recordAudit } from '@/lib/audit/log'
+import {
+  updateWorkflowMcpServerBodySchema,
+  workflowMcpServerParamsSchema,
+} from '@/lib/api/contracts/workflow-mcp-servers'
 import { withRouteHandler } from '@/lib/core/utils/with-route-handler'
 import { getParsedBody, withMcpAuth } from '@/lib/mcp/middleware'
 import { mcpPubSub } from '@/lib/mcp/pubsub'
@@ -25,7 +29,7 @@ export const GET = withRouteHandler(
   withMcpAuth<RouteParams>('read')(
     async (request: NextRequest, { userId, workspaceId, requestId }, { params }) => {
       try {
-        const { id: serverId } = await params
+        const { id: serverId } = workflowMcpServerParamsSchema.parse(await params)
 
         logger.info(`[${requestId}] Getting workflow MCP server: ${serverId}`)
 
@@ -83,8 +87,15 @@ export const PATCH = withRouteHandler(
       { params }
     ) => {
       try {
-        const { id: serverId } = await params
-        const body = getParsedBody(request) || (await request.json())
+        const { id: serverId } = workflowMcpServerParamsSchema.parse(await params)
+        const rawBody = getParsedBody(request) ?? (await request.json())
+        const parsedBody = updateWorkflowMcpServerBodySchema.safeParse(rawBody)
+
+        if (!parsedBody.success) {
+          return createMcpErrorResponse(parsedBody.error, 'Invalid request format', 400)
+        }
+
+        const body = parsedBody.data
 
         logger.info(`[${requestId}] Updating workflow MCP server: ${serverId}`)
 
@@ -164,7 +175,7 @@ export const DELETE = withRouteHandler(
       { params }
     ) => {
       try {
-        const { id: serverId } = await params
+        const { id: serverId } = workflowMcpServerParamsSchema.parse(await params)
 
         logger.info(`[${requestId}] Deleting workflow MCP server: ${serverId}`)
 

@@ -19,6 +19,7 @@
 import { context, type Span, SpanStatusCode, trace } from '@opentelemetry/api'
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
+import { TraceAttr } from '@/lib/copilot/generated/trace-attributes-v1'
 import type { TraceSpan } from '@/lib/logs/types'
 
 /**
@@ -99,6 +100,9 @@ const BLOCK_TYPE_MAPPING: Record<
       }
 
       if (span.tokens) {
+        // `TraceSpan.tokens` is typed as an object, but older persisted logs
+        // stored it as a bare number (total). Keep the numeric branch for those
+        // legacy rows.
         if (typeof span.tokens === 'number') {
           attrs[GenAIAttributes.USAGE_TOTAL_TOKENS] = span.tokens
         } else {
@@ -279,8 +283,8 @@ export function createOTelSpanFromTraceSpan(traceSpan: TraceSpan, parentSpan?: S
           {
             attributes: {
               [GenAIAttributes.TOOL_NAME]: toolCall.name,
-              'tool.status': toolCall.status,
-              'tool.duration_ms': toolCall.duration || 0,
+              [TraceAttr.ToolStatus]: toolCall.status,
+              [TraceAttr.ToolDurationMs]: toolCall.duration || 0,
             },
             startTime: new Date(toolCall.startTime),
           },
@@ -342,8 +346,8 @@ export function createOTelSpansForWorkflowExecution(params: {
           [GenAIAttributes.WORKFLOW_ID]: params.workflowId,
           [GenAIAttributes.WORKFLOW_NAME]: params.workflowName || params.workflowId,
           [GenAIAttributes.WORKFLOW_EXECUTION_ID]: params.executionId,
-          'workflow.trigger': params.trigger,
-          'workflow.duration_ms': params.totalDurationMs,
+          [TraceAttr.WorkflowTrigger]: params.trigger,
+          [TraceAttr.WorkflowDurationMs]: params.totalDurationMs,
         },
         startTime: new Date(params.startTime),
       },
@@ -404,9 +408,9 @@ export async function traceBlockExecution<T>(
     blockMapping.spanName,
     {
       attributes: {
-        'block.type': blockType,
-        'block.id': blockId,
-        'block.name': blockName,
+        [TraceAttr.BlockType]: blockType,
+        [TraceAttr.BlockId]: blockId,
+        [TraceAttr.BlockName]: blockName,
       },
     },
     async (span) => {
@@ -440,8 +444,8 @@ export function trackPlatformEvent(
     const span = tracer.startSpan(eventName, {
       attributes: {
         ...attributes,
-        'event.name': eventName,
-        'event.timestamp': Date.now(),
+        [TraceAttr.EventName]: eventName,
+        [TraceAttr.EventTimestamp]: Date.now(),
       },
     })
     span.setStatus({ code: SpanStatusCode.OK })
@@ -539,11 +543,13 @@ export const PlatformEvents = {
     invitedBy: string
     inviteeEmail: string
     role: string
+    membershipIntent?: string
   }) => {
     trackPlatformEvent('platform.workspace.member_invited', {
       'workspace.id': attrs.workspaceId,
       'user.id': attrs.invitedBy,
       'invitation.role': attrs.role,
+      ...(attrs.membershipIntent ? { 'invitation.membership_intent': attrs.membershipIntent } : {}),
     })
   },
 

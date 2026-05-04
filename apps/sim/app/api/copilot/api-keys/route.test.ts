@@ -14,11 +14,29 @@ const { mockFetch } = vi.hoisted(() => ({
 vi.mock('@/lib/copilot/constants', () => ({
   SIM_AGENT_API_URL_DEFAULT: 'https://agent.sim.example.com',
   SIM_AGENT_API_URL: 'https://agent.sim.example.com',
+  COPILOT_MODES: ['ask', 'build', 'plan'] as const,
+  COPILOT_REQUEST_MODES: ['ask', 'build', 'plan', 'agent'] as const,
 }))
 
 vi.mock('@/lib/core/config/env', () => createEnvMock({ COPILOT_API_KEY: 'test-api-key' }))
 
 import { DELETE, GET } from '@/app/api/copilot/api-keys/route'
+
+// `fetchGo` reads `response.status` and `response.headers.get('content-length')`
+// to stamp span attributes, so mock responses need both fields or the call
+// path throws before the route handler sees the body.
+function buildMockResponse(init: {
+  ok: boolean
+  status?: number
+  json: () => Promise<unknown>
+}): Record<string, unknown> {
+  return {
+    ok: init.ok,
+    status: init.status ?? (init.ok ? 200 : 500),
+    headers: new Headers(),
+    json: init.json,
+  }
+}
 
 describe('Copilot API Keys API Route', () => {
   beforeEach(() => {
@@ -60,10 +78,12 @@ describe('Copilot API Keys API Route', () => {
         },
       ]
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(mockApiKeys),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: true,
+          json: () => Promise.resolve(mockApiKeys),
+        })
+      )
 
       const request = new NextRequest('http://localhost:3000/api/copilot/api-keys')
       const response = await GET(request)
@@ -83,10 +103,12 @@ describe('Copilot API Keys API Route', () => {
         user: { id: 'user-123', email: 'test@example.com' },
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve([]),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: true,
+          json: () => Promise.resolve([]),
+        })
+      )
 
       const request = new NextRequest('http://localhost:3000/api/copilot/api-keys')
       const response = await GET(request)
@@ -101,10 +123,12 @@ describe('Copilot API Keys API Route', () => {
         user: { id: 'user-123', email: 'test@example.com' },
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve([]),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: true,
+          json: () => Promise.resolve([]),
+        })
+      )
 
       const request = new NextRequest('http://localhost:3000/api/copilot/api-keys')
       await GET(request)
@@ -127,11 +151,13 @@ describe('Copilot API Keys API Route', () => {
         user: { id: 'user-123', email: 'test@example.com' },
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        status: 503,
-        json: () => Promise.resolve({ error: 'Service unavailable' }),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: false,
+          status: 503,
+          json: () => Promise.resolve({ error: 'Service unavailable' }),
+        })
+      )
 
       const request = new NextRequest('http://localhost:3000/api/copilot/api-keys')
       const response = await GET(request)
@@ -146,10 +172,12 @@ describe('Copilot API Keys API Route', () => {
         user: { id: 'user-123', email: 'test@example.com' },
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ invalid: 'response' }),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: true,
+          json: () => Promise.resolve({ invalid: 'response' }),
+        })
+      )
 
       const request = new NextRequest('http://localhost:3000/api/copilot/api-keys')
       const response = await GET(request)
@@ -189,10 +217,12 @@ describe('Copilot API Keys API Route', () => {
         },
       ]
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve(mockApiKeys),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: true,
+          json: () => Promise.resolve(mockApiKeys),
+        })
+      )
 
       const request = new NextRequest('http://localhost:3000/api/copilot/api-keys')
       const response = await GET(request)
@@ -207,10 +237,12 @@ describe('Copilot API Keys API Route', () => {
         user: { id: 'user-123', email: 'test@example.com' },
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.reject(new Error('Invalid JSON')),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: true,
+          json: () => Promise.reject(new Error('Invalid JSON')),
+        })
+      )
 
       const request = new NextRequest('http://localhost:3000/api/copilot/api-keys')
       const response = await GET(request)
@@ -251,10 +283,12 @@ describe('Copilot API Keys API Route', () => {
         user: { id: 'user-123', email: 'test@example.com' },
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ success: true }),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: true,
+          json: () => Promise.resolve({ success: true }),
+        })
+      )
 
       const request = new NextRequest('http://localhost:3000/api/copilot/api-keys?id=key-123')
       const response = await DELETE(request)
@@ -281,11 +315,13 @@ describe('Copilot API Keys API Route', () => {
         user: { id: 'user-123', email: 'test@example.com' },
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        status: 404,
-        json: () => Promise.resolve({ error: 'Key not found' }),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: false,
+          status: 404,
+          json: () => Promise.resolve({ error: 'Key not found' }),
+        })
+      )
 
       const request = new NextRequest('http://localhost:3000/api/copilot/api-keys?id=non-existent')
       const response = await DELETE(request)
@@ -300,10 +336,12 @@ describe('Copilot API Keys API Route', () => {
         user: { id: 'user-123', email: 'test@example.com' },
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ success: false }),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: true,
+          json: () => Promise.resolve({ success: false }),
+        })
+      )
 
       const request = new NextRequest('http://localhost:3000/api/copilot/api-keys?id=key-123')
       const response = await DELETE(request)
@@ -333,10 +371,12 @@ describe('Copilot API Keys API Route', () => {
         user: { id: 'user-123', email: 'test@example.com' },
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.reject(new Error('Invalid JSON')),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: true,
+          json: () => Promise.reject(new Error('Invalid JSON')),
+        })
+      )
 
       const request = new NextRequest('http://localhost:3000/api/copilot/api-keys?id=key-123')
       const response = await DELETE(request)

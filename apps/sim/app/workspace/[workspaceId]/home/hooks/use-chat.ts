@@ -11,7 +11,7 @@ import type {
   PersistedFileAttachment,
   PersistedMessage,
 } from '@/lib/copilot/chat/persisted-message'
-import { normalizeMessage } from '@/lib/copilot/chat/persisted-message'
+import { normalizeMessage, withBlockTiming } from '@/lib/copilot/chat/persisted-message'
 import { resolveStreamToolOutcome } from '@/lib/copilot/chat/stream-tool-outcome'
 import { MOTHERSHIP_CHAT_API_PATH, STREAM_STORAGE_KEY } from '@/lib/copilot/constants'
 import type {
@@ -26,8 +26,10 @@ import {
   MothershipStreamV1SessionKind,
   MothershipStreamV1SpanLifecycleEvent,
   MothershipStreamV1SpanPayloadKind,
+  MothershipStreamV1TextChannel,
   MothershipStreamV1ToolOutcome,
   MothershipStreamV1ToolPhase,
+  MothershipStreamV1ToolStatus,
 } from '@/lib/copilot/generated/mothership-stream-v1'
 import {
   CrawlWebsite,
@@ -88,6 +90,7 @@ import {
   markRunToolManuallyStopped,
   reportManualRunToolStop,
 } from '@/lib/copilot/tools/client/run-tool-execution'
+import { setCurrentChatTraceparent } from '@/lib/copilot/tools/client/trace-context'
 import { isWorkflowToolName } from '@/lib/copilot/tools/workflow-tools'
 import { getNextWorkflowColor } from '@/lib/workflows/colors'
 import { getQueryClient } from '@/app/_shell/providers/get-query-client'
@@ -128,6 +131,7 @@ import type {
   MothershipResource,
   MothershipResourceType,
   QueuedMessage,
+  ToolCallInfo,
 } from '../types'
 import { ToolCallStatus } from '../types'
 
@@ -697,11 +701,39 @@ function parseStreamBatchResponse(value: unknown): StreamBatchResponse {
 }
 
 function toRawPersistedContentBlock(block: ContentBlock): Record<string, unknown> | null {
+  const persisted = toRawPersistedContentBlockBody(block)
+  if (!persisted) return null
+  if (block.parentToolCallId) persisted.parentToolCallId = block.parentToolCallId
+  return withBlockTiming(persisted, block)
+}
+
+function toRawPersistedContentBlockBody(block: ContentBlock): Record<string, unknown> | null {
   switch (block.type) {
     case 'text':
       return {
         type: MothershipStreamV1EventType.text,
         ...(block.subagent ? { lane: 'subagent' } : {}),
+        channel: MothershipStreamV1TextChannel.assistant,
+        content: block.content ?? '',
+      }
+    case 'thinking':
+      return {
+        type: MothershipStreamV1EventType.text,
+        channel: MothershipStreamV1TextChannel.thinking,
+        content: block.content ?? '',
+      }
+    case 'subagent_thinking':
+      return {
+        type: MothershipStreamV1EventType.text,
+        lane: 'subagent',
+        channel: MothershipStreamV1TextChannel.thinking,
+        content: block.content ?? '',
+      }
+    case 'subagent_text':
+      return {
+        type: MothershipStreamV1EventType.text,
+        lane: 'subagent',
+        channel: MothershipStreamV1TextChannel.assistant,
         content: block.content ?? '',
       }
     case 'tool_call':
@@ -771,22 +803,27 @@ function buildAssistantSnapshotMessage(params: {
 }
 
 function markMessageStopped(message: PersistedMessage): PersistedMessage {
-  if (!message.contentBlocks?.some((block) => block.toolCall?.state === 'executing')) {
+  const hasExecutingTool = message.contentBlocks?.some(
+    (block) => block.toolCall?.state === 'executing'
+  )
+  const hasOpenBlock = message.contentBlocks?.some((block) => block.endedAt === undefined)
+  if (!hasExecutingTool && !hasOpenBlock) {
     return message
   }
 
-  const nextBlocks = message.contentBlocks.map((block) => {
-    if (block.toolCall?.state !== 'executing') {
-      return block
+  const stopTs = Date.now()
+  const nextBlocks = (message.contentBlocks ?? []).map((block) => {
+    const stamped = block.endedAt === undefined ? { ...block, endedAt: stopTs } : block
+    if (stamped.toolCall?.state !== 'executing') {
+      return stamped
     }
-
     return {
-      ...block,
+      ...stamped,
       toolCall: {
-        ...block.toolCall,
+        ...stamped.toolCall,
         state: 'cancelled' as const,
         display: {
-          ...(block.toolCall.display ?? {}),
+          ...(stamped.toolCall.display ?? {}),
           title: 'Stopped by user',
         },
       },
@@ -1181,7 +1218,7 @@ export function useChat(
       reader: ReadableStreamDefaultReader<Uint8Array>,
       assistantId: string,
       expectedGen?: number,
-      options?: { preserveExistingState?: boolean }
+      options?: { preserveExistingState?: boolean; suppressWorkflowToolStarts?: boolean }
     ) => Promise<{ sawStreamError: boolean; sawComplete: boolean }>
   >(async () => ({ sawStreamError: false, sawComplete: false }))
   const attachToExistingStreamRef = useRef<
@@ -1273,6 +1310,14 @@ export function useChat(
   const activeTurnRef = useRef<ActiveTurn | null>(null)
   const pendingUserMsgRef = useRef<PersistedMessage | null>(null)
   const streamIdRef = useRef<string | undefined>(undefined)
+  // W3C traceparent from the chat POST response; echoed on
+  // abort/stop/confirm/replay so side-channel calls join the same
+  // trace instead of becoming disconnected roots.
+  const streamTraceparentRef = useRef<string | undefined>(undefined)
+  // The `request.id` from the active stream's trace events. Forwarded
+  // to /chat/stop so the persisted aborted message carries it (keeps
+  // the copy-request-ID button functional after refetch).
+  const streamRequestIdRef = useRef<string | undefined>(undefined)
   const locallyTerminalStreamIdRef = useRef<string | undefined>(undefined)
   const lastCursorRef = useRef('0')
   const sendingRef = useRef(false)
@@ -1311,6 +1356,9 @@ export function useChat(
     activeTurnRef.current = null
     pendingUserMsgRef.current = null
     streamIdRef.current = undefined
+    streamRequestIdRef.current = undefined
+    streamTraceparentRef.current = undefined
+    setCurrentChatTraceparent(undefined)
     lastCursorRef.current = '0'
     resetStreamingBuffers()
   }, [resetStreamingBuffers])
@@ -1357,6 +1405,7 @@ export function useChat(
 
     const persistChatId = chatIdRef.current ?? selectedChatIdRef.current
     if (persistChatId) {
+      // boundary-raw-fetch: fire-and-forget side-effect during stream lifecycle; intentionally avoids requestJson's response parsing/throw semantics so a failure here cannot interrupt the active turn
       fetch('/api/mothership/chat/resources', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1412,6 +1461,9 @@ export function useChat(
       if (handledClientWorkflowToolIdsRef.current.has(toolCallId)) {
         return
       }
+      if (recoveringClientWorkflowToolIdsRef.current.has(toolCallId)) {
+        return
+      }
       handledClientWorkflowToolIdsRef.current.add(toolCallId)
 
       ensureWorkflowToolResource(toolArgs)
@@ -1422,41 +1474,41 @@ export function useChat(
 
   const recoverPendingClientWorkflowTools = useCallback(
     async (nextMessages: ChatMessage[]) => {
+      const pending: ToolCallInfo[] = []
+
       for (const message of nextMessages) {
         for (const block of message.contentBlocks ?? []) {
           const toolCall = block.toolCall
-          if (!toolCall || !isWorkflowToolName(toolCall.name)) {
-            continue
-          }
-          if (toolCall.status !== 'executing') {
-            continue
-          }
-
+          if (!toolCall || !isWorkflowToolName(toolCall.name)) continue
+          if (toolCall.status !== 'executing') continue
           if (
             handledClientWorkflowToolIdsRef.current.has(toolCall.id) ||
             recoveringClientWorkflowToolIdsRef.current.has(toolCall.id)
           ) {
             continue
           }
-
           recoveringClientWorkflowToolIdsRef.current.add(toolCall.id)
+          pending.push(toolCall)
+        }
+      }
 
-          try {
-            const toolArgs = toolCall.params ?? {}
-            const targetWorkflowId = ensureWorkflowToolResource(toolArgs)
+      for (const toolCall of pending) {
+        try {
+          const toolArgs = toolCall.params ?? {}
+          const targetWorkflowId = ensureWorkflowToolResource(toolArgs)
 
-            if (targetWorkflowId) {
-              const rebound = await bindRunToolToExecution(toolCall.id, targetWorkflowId)
-              if (rebound) {
-                handledClientWorkflowToolIdsRef.current.add(toolCall.id)
-                continue
-              }
+          if (targetWorkflowId) {
+            const rebound = await bindRunToolToExecution(toolCall.id, targetWorkflowId)
+            if (rebound) {
+              handledClientWorkflowToolIdsRef.current.add(toolCall.id)
+              continue
             }
-
-            startClientWorkflowTool(toolCall.id, toolCall.name, toolArgs)
-          } finally {
-            recoveringClientWorkflowToolIdsRef.current.delete(toolCall.id)
           }
+
+          recoveringClientWorkflowToolIdsRef.current.delete(toolCall.id)
+          startClientWorkflowTool(toolCall.id, toolCall.name, toolArgs)
+        } finally {
+          recoveringClientWorkflowToolIdsRef.current.delete(toolCall.id)
         }
       }
     },
@@ -1544,6 +1596,7 @@ export function useChat(
     void recoverPendingClientWorkflowTools(mappedMessages)
 
     if (chatHistory.resources.some((r) => r.id === 'streaming-file')) {
+      // boundary-raw-fetch: fire-and-forget cleanup during chat-history hydration; failures are silently swallowed to keep hydration non-blocking
       fetch('/api/mothership/chat/resources', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
@@ -1656,7 +1709,7 @@ export function useChat(
       reader: ReadableStreamDefaultReader<Uint8Array>,
       assistantId: string,
       expectedGen?: number,
-      options?: { preserveExistingState?: boolean }
+      options?: { preserveExistingState?: boolean; suppressWorkflowToolStarts?: boolean }
     ) => {
       const decoder = new TextDecoder()
       streamReaderRef.current = reader
@@ -1686,6 +1739,7 @@ export function useChat(
         for (let i = blocks.length - 1; i >= 0; i--) {
           if (blocks[i].type === 'subagent' && blocks[i].content) {
             activeSubagent = blocks[i].content
+            activeSubagentParentToolCallId = blocks[i].parentToolCallId
             break
           }
           if (blocks[i].type === 'subagent_end') {
@@ -1703,11 +1757,57 @@ export function useChat(
         streamingBlocksRef.current = []
       }
 
-      const ensureTextBlock = (subagentName?: string): ContentBlock => {
+      const toEventMs = (ts: string | undefined): number => {
+        if (ts) {
+          const parsed = Date.parse(ts)
+          if (Number.isFinite(parsed)) return parsed
+        }
+        return Date.now()
+      }
+
+      const stampBlockEnd = (block: ContentBlock | undefined, ts?: string) => {
+        if (block && block.endedAt === undefined) block.endedAt = toEventMs(ts)
+      }
+
+      const ensureTextBlock = (
+        subagentName: string | undefined,
+        parentToolCallId: string | undefined,
+        ts?: string
+      ): ContentBlock => {
         const last = blocks[blocks.length - 1]
-        if (last?.type === 'text' && last.subagent === subagentName) return last
-        const b: ContentBlock = { type: 'text', content: '' }
+        if (
+          last?.type === 'text' &&
+          last.subagent === subagentName &&
+          last.parentToolCallId === parentToolCallId
+        ) {
+          return last
+        }
+        stampBlockEnd(last, ts)
+        const b: ContentBlock = { type: 'text', content: '', timestamp: toEventMs(ts) }
         if (subagentName) b.subagent = subagentName
+        if (parentToolCallId) b.parentToolCallId = parentToolCallId
+        blocks.push(b)
+        return b
+      }
+
+      const ensureThinkingBlock = (
+        subagentName: string | undefined,
+        parentToolCallId: string | undefined,
+        ts?: string
+      ): ContentBlock => {
+        const targetType = subagentName ? 'subagent_thinking' : 'thinking'
+        const last = blocks[blocks.length - 1]
+        if (
+          last?.type === targetType &&
+          last.subagent === subagentName &&
+          last.parentToolCallId === parentToolCallId
+        ) {
+          return last
+        }
+        stampBlockEnd(last, ts)
+        const b: ContentBlock = { type: targetType, content: '', timestamp: toEventMs(ts) }
+        if (subagentName) b.subagent = subagentName
+        if (parentToolCallId) b.parentToolCallId = parentToolCallId
         blocks.push(b)
         return b
       }
@@ -1724,9 +1824,27 @@ export function useChat(
         return activeSubagent
       }
 
-      const appendInlineErrorTag = (tag: string, subagentName?: string) => {
+      const resolveParentForSubagentBlock = (
+        subagent: string | undefined,
+        scopedParent: string | undefined
+      ): string | undefined => {
+        if (!subagent) return undefined
+        if (scopedParent) return scopedParent
+        if (activeSubagent === subagent) return activeSubagentParentToolCallId
+        for (const [parent, name] of subagentByParentToolCallId) {
+          if (name === subagent) return parent
+        }
+        return undefined
+      }
+
+      const appendInlineErrorTag = (
+        tag: string,
+        subagentName?: string,
+        parentToolCallId?: string,
+        ts?: string
+      ) => {
         if (runningText.includes(tag)) return
-        const tb = ensureTextBlock(subagentName)
+        const tb = ensureTextBlock(subagentName, parentToolCallId, ts)
         const prefix = runningText.length > 0 && !runningText.endsWith('\n') ? '\n' : ''
         tb.content = `${tb.content ?? ''}${prefix}${tag}`
         runningText += `${prefix}${tag}`
@@ -1810,8 +1928,10 @@ export function useChat(
       try {
         const pendingLines: string[] = []
 
-        readLoop: while (true) {
+        while (true) {
           if (pendingLines.length === 0) {
+            // Don't read another chunk after `complete` has drained.
+            if (sawCompleteEvent) break
             const { done, value } = await reader.read()
             if (done) break
             if (isStale()) continue
@@ -1851,6 +1971,7 @@ export function useChat(
 
           if (parsed.trace?.requestId && parsed.trace.requestId !== streamRequestId) {
             streamRequestId = parsed.trace.requestId
+            streamRequestIdRef.current = streamRequestId
             flush()
           }
           if (parsed.stream?.streamId) {
@@ -1934,13 +2055,28 @@ export function useChat(
             case MothershipStreamV1EventType.text: {
               const chunk = parsed.payload.text
               if (chunk) {
+                const eventTs = typeof parsed.ts === 'string' ? parsed.ts : undefined
+                if (parsed.payload.channel === MothershipStreamV1TextChannel.thinking) {
+                  const scopedParentForBlock = resolveParentForSubagentBlock(
+                    scopedSubagent,
+                    scopedParentToolCallId
+                  )
+                  const tb = ensureThinkingBlock(scopedSubagent, scopedParentForBlock, eventTs)
+                  tb.content = (tb.content ?? '') + chunk
+                  flushText()
+                  break
+                }
                 const contentSource: 'main' | 'subagent' = scopedSubagent ? 'subagent' : 'main'
                 const needsBoundaryNewline =
                   lastContentSource !== null &&
                   lastContentSource !== contentSource &&
                   runningText.length > 0 &&
                   !runningText.endsWith('\n')
-                const tb = ensureTextBlock(scopedSubagent)
+                const scopedParentForBlock = resolveParentForSubagentBlock(
+                  scopedSubagent,
+                  scopedParentToolCallId
+                )
+                const tb = ensureTextBlock(scopedSubagent, scopedParentForBlock, eventTs)
                 const normalizedChunk = needsBoundaryNewline ? `\n${chunk}` : chunk
                 tb.content = (tb.content ?? '') + normalizedChunk
                 runningText += normalizedChunk
@@ -2154,6 +2290,7 @@ export function useChat(
                   output: payload.output,
                   error: typeof payload.error === 'string' ? payload.error : undefined,
                 }
+                stampBlockEnd(blocks[idx])
                 flush()
 
                 if (tc.name === ReadTool.id && tc.status === 'success') {
@@ -2245,7 +2382,9 @@ export function useChat(
               }
 
               const name = payload.toolName
-              const isPartial = payload.partial === true
+              const isPartial =
+                payload.partial === true ||
+                payload.status === MothershipStreamV1ToolStatus.generating
               if (name === ToolSearchToolRegex.id || isToolHiddenInUi(name)) {
                 break
               }
@@ -2273,8 +2412,17 @@ export function useChat(
                 }
               }
 
-              if (!toolMap.has(id)) {
+              const existingToolCall = toolMap.has(id)
+                ? blocks[toolMap.get(id)!]?.toolCall
+                : undefined
+              const isNewToolCall = !existingToolCall
+              if (isNewToolCall) {
+                stampBlockEnd(blocks[blocks.length - 1])
                 toolMap.set(id, blocks.length)
+                const parentToolCallIdForBlock = resolveParentForSubagentBlock(
+                  scopedSubagent,
+                  scopedParentToolCallId
+                )
                 blocks.push({
                   type: 'tool_call',
                   toolCall: {
@@ -2285,6 +2433,10 @@ export function useChat(
                     params: args,
                     calledBy: scopedSubagent,
                   },
+                  ...(parentToolCallIdForBlock
+                    ? { parentToolCallId: parentToolCallIdForBlock }
+                    : {}),
+                  timestamp: Date.now(),
                 })
                 if (name === ReadTool.id || isResourceToolName(name)) {
                   if (args) toolArgsMap.set(id, args)
@@ -2301,7 +2453,14 @@ export function useChat(
               flush()
 
               if (isWorkflowToolName(name) && !isPartial) {
-                startClientWorkflowTool(id, name, args ?? {})
+                const shouldStartWorkflowTool =
+                  !options?.suppressWorkflowToolStarts &&
+                  (isNewToolCall ||
+                    (existingToolCall?.status === ToolCallStatus.executing &&
+                      !existingToolCall.result))
+                if (shouldStartWorkflowTool) {
+                  startClientWorkflowTool(id, name, args ?? {})
+                }
               }
               break
             }
@@ -2358,6 +2517,7 @@ export function useChat(
               if (payload.kind === MothershipStreamV1RunKind.compaction_start) {
                 const compactionId = `compaction_${Date.now()}`
                 activeCompactionId = compactionId
+                stampBlockEnd(blocks[blocks.length - 1])
                 toolMap.set(compactionId, blocks.length)
                 blocks.push({
                   type: 'tool_call',
@@ -2367,6 +2527,7 @@ export function useChat(
                     status: 'executing',
                     displayTitle: 'Compacting context...',
                   },
+                  timestamp: Date.now(),
                 })
                 flush()
               } else if (payload.kind === MothershipStreamV1RunKind.compaction_done) {
@@ -2376,8 +2537,10 @@ export function useChat(
                 if (idx !== undefined && blocks[idx]?.toolCall) {
                   blocks[idx].toolCall!.status = 'success'
                   blocks[idx].toolCall!.displayTitle = 'Compacted context'
+                  stampBlockEnd(blocks[idx])
                 } else {
                   toolMap.set(compactionId, blocks.length)
+                  const endNow = Date.now()
                   blocks.push({
                     type: 'tool_call',
                     toolCall: {
@@ -2386,6 +2549,8 @@ export function useChat(
                       status: 'success',
                       displayTitle: 'Compacted context',
                     },
+                    timestamp: endNow,
+                    endedAt: endNow,
                   })
                 }
                 flush()
@@ -2398,9 +2563,13 @@ export function useChat(
                 break
               }
               const spanData = asPayloadRecord(payload.data)
-              const parentToolCallId =
-                scopedParentToolCallId ??
-                (typeof spanData?.tool_call_id === 'string' ? spanData.tool_call_id : undefined)
+              const parentToolCallIdFromData =
+                typeof spanData?.tool_call_id === 'string'
+                  ? spanData.tool_call_id
+                  : typeof spanData?.toolCallId === 'string'
+                    ? spanData.toolCallId
+                    : undefined
+              const parentToolCallId = scopedParentToolCallId ?? parentToolCallIdFromData
               const isPendingPause = spanData?.pending === true
               const name = typeof payload.agent === 'string' ? payload.agent : scopedAgentId
               if (payload.event === MothershipStreamV1SpanLifecycleEvent.start && name) {
@@ -2414,7 +2583,13 @@ export function useChat(
                 activeSubagent = name
                 activeSubagentParentToolCallId = parentToolCallId
                 if (!isSameActiveSubagent) {
-                  blocks.push({ type: 'subagent', content: name })
+                  stampBlockEnd(blocks[blocks.length - 1])
+                  blocks.push({
+                    type: 'subagent',
+                    content: name,
+                    ...(parentToolCallId ? { parentToolCallId } : {}),
+                    timestamp: Date.now(),
+                  })
                 }
                 if (name === FILE_SUBAGENT_ID && !isSameActiveSubagent) {
                   applyPreviewSessionUpdate({
@@ -2454,7 +2629,27 @@ export function useChat(
                   activeSubagent = undefined
                   activeSubagentParentToolCallId = undefined
                 }
-                blocks.push({ type: 'subagent_end' })
+                const endNow = Date.now()
+                if (name) {
+                  for (let i = blocks.length - 1; i >= 0; i--) {
+                    const b = blocks[i]
+                    if (
+                      b.type === 'subagent' &&
+                      b.content === name &&
+                      b.endedAt === undefined &&
+                      (!parentToolCallId || b.parentToolCallId === parentToolCallId)
+                    ) {
+                      b.endedAt = endNow
+                      break
+                    }
+                  }
+                }
+                stampBlockEnd(blocks[blocks.length - 1])
+                blocks.push({
+                  type: 'subagent_end',
+                  ...(parentToolCallId ? { parentToolCallId } : {}),
+                  timestamp: endNow,
+                })
                 flush()
               }
               break
@@ -2462,14 +2657,23 @@ export function useChat(
             case MothershipStreamV1EventType.error: {
               sawStreamError = true
               setError(parsed.payload.message || parsed.payload.error || 'An error occurred')
-              appendInlineErrorTag(buildInlineErrorTag(parsed.payload), scopedSubagent)
+              appendInlineErrorTag(
+                buildInlineErrorTag(parsed.payload),
+                scopedSubagent,
+                resolveParentForSubagentBlock(scopedSubagent, scopedParentToolCallId),
+                typeof parsed.ts === 'string' ? parsed.ts : undefined
+              )
               break
             }
             case MothershipStreamV1EventType.complete: {
               sawCompleteEvent = true
-              // `complete` is terminal for this stream, even if the transport takes a moment
-              // longer to close.
-              break readLoop
+              stampBlockEnd(blocks[blocks.length - 1])
+              // `complete` is the end-of-turn marker; drain whatever
+              // else arrived in the same TCP chunk (trailing text,
+              // followups, run metadata) before stopping. Do NOT
+              // await another read — events after `complete` would
+              // be a server bug.
+              continue
             }
           }
         }
@@ -2528,9 +2732,15 @@ export function useChat(
       afterCursor: string,
       signal?: AbortSignal
     ): Promise<StreamBatchResponse> => {
+      // boundary-raw-fetch: stream-resume batch endpoint requires dynamic per-request traceparent header propagation that the contract layer does not model, and the response is consumed alongside live SSE tail fetches
       const response = await fetch(
         `/api/mothership/chat/stream?streamId=${encodeURIComponent(streamId)}&after=${encodeURIComponent(afterCursor)}&batch=true`,
-        { signal }
+        {
+          signal,
+          ...(streamTraceparentRef.current
+            ? { headers: { traceparent: streamTraceparentRef.current } }
+            : {}),
+        }
       )
       if (!response.ok) {
         throw new Error(`Stream resume batch failed: ${response.status}`)
@@ -2556,6 +2766,7 @@ export function useChat(
       let latestCursor = afterCursor
       let seedEvents = opts.initialBatch?.events ?? []
       let streamStatus = opts.initialBatch?.status ?? 'unknown'
+      let suppressSeedWorkflowStarts = seedEvents.length > 0
 
       const isStaleReconnect = () =>
         streamGenRef.current !== expectedGen || abortControllerRef.current?.signal.aborted === true
@@ -2574,11 +2785,15 @@ export function useChat(
               buildReplayStream(seedEvents).getReader(),
               assistantId,
               expectedGen,
-              { preserveExistingState: true }
+              {
+                preserveExistingState: true,
+                suppressWorkflowToolStarts: suppressSeedWorkflowStarts,
+              }
             )
             latestCursor = String(seedEvents[seedEvents.length - 1]?.eventId ?? latestCursor)
             lastCursorRef.current = latestCursor
             seedEvents = []
+            suppressSeedWorkflowStarts = false
 
             if (replayResult.sawStreamError) {
               return { error: true, aborted: false }
@@ -2599,9 +2814,15 @@ export function useChat(
 
           logger.info('Opening live stream tail', { streamId, afterCursor: latestCursor })
 
+          // boundary-raw-fetch: live SSE tail endpoint streams events consumed via response.body.getReader() and processSSEStream
           const sseRes = await fetch(
             `/api/mothership/chat/stream?streamId=${encodeURIComponent(streamId)}&after=${encodeURIComponent(latestCursor)}`,
-            { signal: activeAbort.signal }
+            {
+              signal: activeAbort.signal,
+              ...(streamTraceparentRef.current
+                ? { headers: { traceparent: streamTraceparentRef.current } }
+                : {}),
+            }
           )
           if (!sseRes.ok || !sseRes.body) {
             throw new Error(RECONNECT_TAIL_ERROR)
@@ -2842,15 +3063,25 @@ export function useChat(
       streamId?: string
       content?: string
       blocks?: ContentBlock[]
+      // `stopGeneration` must snapshot these BEFORE clearActiveTurn()
+      // nulls the refs, or the fetch sees undefined.
+      requestId?: string
+      traceparent?: string
     }) => {
       const chatId = overrides?.chatId ?? chatIdRef.current
       const streamId = overrides?.streamId ?? streamIdRef.current
       if (!chatId || !streamId) return
 
       const content = overrides?.content ?? streamingContentRef.current
+      const requestId = overrides?.requestId ?? streamRequestIdRef.current
+      const traceparent = overrides?.traceparent ?? streamTraceparentRef.current
 
       const sourceBlocks = overrides?.blocks ?? streamingBlocksRef.current
       const storedBlocks = sourceBlocks.map((block) => {
+        const timing = {
+          ...(typeof block.timestamp === 'number' ? { timestamp: block.timestamp } : {}),
+          ...(typeof block.endedAt === 'number' ? { endedAt: block.endedAt } : {}),
+        }
         if (block.type === 'tool_call' && block.toolCall) {
           const isCancelled =
             block.toolCall.status === 'executing' || block.toolCall.status === 'cancelled'
@@ -2868,9 +3099,17 @@ export function useChat(
               ...(display ? { display } : {}),
               calledBy: block.toolCall.calledBy,
             },
+            ...(block.parentToolCallId ? { parentToolCallId: block.parentToolCallId } : {}),
+            ...timing,
           }
         }
-        return { type: block.type, content: block.content }
+        return {
+          type: block.type,
+          content: block.content,
+          ...(block.subagent ? { lane: 'subagent' } : {}),
+          ...(block.parentToolCallId ? { parentToolCallId: block.parentToolCallId } : {}),
+          ...timing,
+        }
       })
 
       if (storedBlocks.length > 0) {
@@ -2880,12 +3119,16 @@ export function useChat(
       try {
         const res = await fetch(stopPathRef.current, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(traceparent ? { traceparent } : {}),
+          },
           body: JSON.stringify({
             chatId,
             streamId,
             content,
             ...(storedBlocks.length > 0 && { contentBlocks: storedBlocks }),
+            ...(requestId ? { requestId } : {}),
           }),
         })
         if (!res.ok) {
@@ -2924,9 +3167,36 @@ export function useChat(
   const messagesRef = useRef(messages)
   messagesRef.current = messages
 
+  /**
+   * Notify downstream consumers that a turn has ended and, if a
+   * follow-up message is queued, kick the dispatcher. Safe to call
+   * from both the normal-completion path (`finalize`) and the
+   * abort/stop path (`stopGeneration`), which previously short-
+   * circuited without notifying — queued messages then sat until the
+   * user manually re-sent. Idempotent w.r.t. `onStreamEnd` (one call
+   * per terminal transition); the dispatcher itself de-dupes.
+   */
+  const notifyTurnEnded = useCallback(
+    (options: { error: boolean; skipQueueDispatch?: boolean }) => {
+      const hasQueuedFollowUp = !options.error && messageQueueRef.current.length > 0
+      if (!options.error) {
+        const cid = chatIdRef.current
+        if (cid && onStreamEndRef.current) {
+          onStreamEndRef.current(cid, messagesRef.current)
+        }
+      }
+      if (!options.error && !options.skipQueueDispatch && hasQueuedFollowUp) {
+        void enqueueQueueDispatchRef.current({ type: 'send_head' })
+      }
+      return hasQueuedFollowUp
+    },
+    []
+  )
+
   const finalize = useCallback(
     (options?: { error?: boolean }) => {
-      const hasQueuedFollowUp = !options?.error && messageQueueRef.current.length > 0
+      const isError = !!options?.error
+      const hasQueuedFollowUp = !isError && messageQueueRef.current.length > 0
       reconcileTerminalPreviewSessions()
       locallyTerminalStreamIdRef.current =
         streamIdRef.current ?? activeTurnRef.current?.userMessageId ?? undefined
@@ -2934,23 +3204,15 @@ export function useChat(
       setTransportIdle()
       abortControllerRef.current = null
       invalidateChatQueries({ includeDetail: !hasQueuedFollowUp })
-
-      if (!options?.error) {
-        const cid = chatIdRef.current
-        if (cid && onStreamEndRef.current) {
-          onStreamEndRef.current(cid, messagesRef.current)
-        }
-      }
-
-      if (options?.error) {
-        return
-      }
-
-      if (hasQueuedFollowUp) {
-        void enqueueQueueDispatchRef.current({ type: 'send_head' })
-      }
+      notifyTurnEnded({ error: isError })
     },
-    [clearActiveTurn, invalidateChatQueries, reconcileTerminalPreviewSessions, setTransportIdle]
+    [
+      clearActiveTurn,
+      invalidateChatQueries,
+      notifyTurnEnded,
+      reconcileTerminalPreviewSessions,
+      setTransportIdle,
+    ]
   )
   finalizeRef.current = finalize
 
@@ -3162,6 +3424,14 @@ export function useChat(
           signal: abortController.signal,
         })
 
+        // Capture for propagation on side-channel calls + non-React
+        // tool-completion callbacks (via trace-context singleton).
+        const traceparent = response.headers.get('traceparent')
+        if (traceparent) {
+          streamTraceparentRef.current = traceparent
+          setCurrentChatTraceparent(traceparent)
+        }
+
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}))
           if (response.status === 409) {
@@ -3352,6 +3622,7 @@ export function useChat(
       const executionId = execState.getCurrentExecutionId(workflowId)
       if (executionId) {
         execState.setCurrentExecutionId(workflowId, null)
+        // boundary-raw-fetch: fire-and-forget execution cancellation invoked from a stop-generation barrier; failures are silently swallowed so the stop teardown cannot stall on a contract-validation throw
         fetch(`/api/workflows/${workflowId}/executions/${executionId}/cancel`, {
           method: 'POST',
         }).catch(() => {})
@@ -3397,12 +3668,28 @@ export function useChat(
       queryClient.getQueryData<TaskChatHistory>(taskKeys.detail(chatIdRef.current))
         ?.activeStreamId ||
       undefined
+    // Snapshot the active assistant message id BEFORE clearActiveTurn()
+    // nulls the ref. Used below to restrict markMessageStopped to the
+    // in-flight turn only — historical messages from the chat history
+    // also lack `endedAt` on their legacy blocks (pre-timing-fields),
+    // and without this gate we'd corrupt them with cancelled markers.
+    const activeAssistantMessageId =
+      activeTurnRef.current?.assistantMessageId ??
+      (sid ? getLiveAssistantMessageId(sid) : undefined)
     const stopContentSnapshot = streamingContentRef.current
+    const stopNow = Date.now()
     const stopBlocksSnapshot = streamingBlocksRef.current.map((block) => ({
       ...block,
       ...(block.options ? { options: [...block.options] } : {}),
       ...(block.toolCall ? { toolCall: { ...block.toolCall } } : {}),
+      ...(block.endedAt === undefined ? { endedAt: stopNow } : {}),
     }))
+    // Snapshot BEFORE clearActiveTurn() nulls the refs. Both
+    // persistPartialResponse and the abort/stop fetches run inside
+    // stopBarrier below, after several awaits — the refs are long
+    // gone by the time the fetches serialize their headers.
+    const stopRequestIdSnapshot = streamRequestIdRef.current
+    const stopTraceparentSnapshot = streamTraceparentRef.current
 
     locallyTerminalStreamIdRef.current = sid
     streamGenRef.current++
@@ -3417,22 +3704,31 @@ export function useChat(
       await queryClient.cancelQueries({ queryKey: taskKeys.detail(activeChatId) })
       upsertTaskChatHistory(activeChatId, (current) => ({
         ...current,
-        messages: current.messages.map(markMessageStopped),
+        messages: current.messages.map((message) =>
+          activeAssistantMessageId && message.id === activeAssistantMessageId
+            ? markMessageStopped(message)
+            : message
+        ),
       }))
     } else {
       setPendingMessages((prev) =>
         prev.map((msg) => {
-          if (!msg.contentBlocks?.some((block) => block.toolCall?.status === 'executing')) {
+          const hasExecutingTool = msg.contentBlocks?.some(
+            (block) => block.toolCall?.status === 'executing'
+          )
+          const hasOpenBlock = msg.contentBlocks?.some((block) => block.endedAt === undefined)
+          if (!hasExecutingTool && !hasOpenBlock) {
             return msg
           }
-          const updatedBlocks = msg.contentBlocks.map((block) => {
-            if (block.toolCall?.status !== 'executing') {
-              return block
+          const updatedBlocks = (msg.contentBlocks ?? []).map((block) => {
+            const stamped = block.endedAt === undefined ? { ...block, endedAt: stopNow } : block
+            if (stamped.toolCall?.status !== 'executing') {
+              return stamped
             }
             return {
-              ...block,
+              ...stamped,
               toolCall: {
-                ...block.toolCall,
+                ...stamped.toolCall,
                 status: 'cancelled' as const,
                 displayTitle: 'Stopped by user',
               },
@@ -3460,9 +3756,13 @@ export function useChat(
         const resolvedChatId = chatIdRef.current
         const abortPromise = sid
           ? (async () => {
+              // boundary-raw-fetch: stream-abort endpoint requires propagating the snapshotted traceparent header from the in-flight stream and has no contract authored yet
               const res = await fetch('/api/mothership/chat/abort', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...(stopTraceparentSnapshot ? { traceparent: stopTraceparentSnapshot } : {}),
+                },
                 body: JSON.stringify({
                   streamId: sid,
                   ...(resolvedChatId ? { chatId: resolvedChatId } : {}),
@@ -3485,6 +3785,8 @@ export function useChat(
             streamId: sid,
             content: stopContentSnapshot,
             blocks: stopBlocksSnapshot,
+            requestId: stopRequestIdSnapshot,
+            traceparent: stopTraceparentSnapshot,
           })
         }
 
@@ -3498,6 +3800,8 @@ export function useChat(
     pendingStopPromiseRef.current = stopBarrier
     try {
       await stopBarrier
+      // Dispatch queued follow-ups after Stop resolves.
+      notifyTurnEnded({ error: false })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to stop the previous response')
       throw err
@@ -3509,6 +3813,7 @@ export function useChat(
   }, [
     cancelActiveWorkflowExecutions,
     invalidateChatQueries,
+    notifyTurnEnded,
     persistPartialResponse,
     queryClient,
     resetEphemeralPreviewState,

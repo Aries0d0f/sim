@@ -1,7 +1,7 @@
 import { vi } from 'vitest'
 
 /**
- * Controllable mock functions for `@/lib/audit/log`.
+ * Controllable mock functions for `@sim/audit`.
  * Exposes `mockRecordAudit` so tests can assert or override behavior per test.
  *
  * @example
@@ -17,11 +17,11 @@ export const auditMockFns = {
 }
 
 /**
- * Static mock module for `@/lib/audit/log`.
+ * Static mock module for `@sim/audit`.
  *
  * @example
  * ```ts
- * vi.mock('@/lib/audit/log', () => auditMock)
+ * vi.mock('@sim/audit', () => auditMock)
  * ```
  */
 export const auditMock = {
@@ -40,8 +40,9 @@ export const auditMock = {
     CHAT_DELETED: 'chat.deleted',
     CREDENTIAL_CREATED: 'credential.created',
     CREDENTIAL_UPDATED: 'credential.updated',
-    CREDENTIAL_DELETED: 'credential.deleted',
     CREDENTIAL_RENAMED: 'credential.renamed',
+    CREDENTIAL_RECONNECTED: 'credential.reconnected',
+    CREDENTIAL_DELETED: 'credential.deleted',
     CREDIT_PURCHASED: 'credit.purchased',
     CREDENTIAL_SET_CREATED: 'credential_set.created',
     CREDENTIAL_SET_UPDATED: 'credential_set.updated',

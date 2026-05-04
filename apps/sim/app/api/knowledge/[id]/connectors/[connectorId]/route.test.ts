@@ -50,7 +50,7 @@ vi.mock('@/lib/knowledge/tags/service', () => ({
 vi.mock('@/lib/knowledge/documents/service', () => ({
   deleteDocumentStorageFiles: vi.fn().mockResolvedValue(undefined),
 }))
-vi.mock('@/lib/audit/log', () => auditMock)
+vi.mock('@sim/audit', () => auditMock)
 
 import { DELETE, GET, PATCH } from '@/app/api/knowledge/[id]/connectors/[connectorId]/route'
 
@@ -162,7 +162,7 @@ describe('Knowledge Connector By ID API Route', () => {
       const data = await response.json()
 
       expect(response.status).toBe(400)
-      expect(data.error).toBe('Invalid request')
+      expect(data.error).toBe('Validation error')
     })
 
     it('returns 404 when connector not found during sourceConfig validation', async () => {

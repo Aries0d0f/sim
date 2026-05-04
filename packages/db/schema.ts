@@ -127,6 +127,7 @@ export const workflowFolder = pgTable(
     parentId: text('parent_id'), // Self-reference will be handled by foreign key constraint
     color: text('color').default('#6B7280'),
     isExpanded: boolean('is_expanded').notNull().default(true),
+    locked: boolean('locked').notNull().default(false),
     sortOrder: integer('sort_order').notNull().default(0),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
@@ -165,6 +166,7 @@ export const workflow = pgTable(
     isDeployed: boolean('is_deployed').notNull().default(false),
     deployedAt: timestamp('deployed_at'),
     isPublicApi: boolean('is_public_api').notNull().default(false),
+    locked: boolean('locked').notNull().default(false),
     runCount: integer('run_count').notNull().default(0),
     lastRunAt: timestamp('last_run_at'),
     variables: json('variables').default('{}'),
@@ -734,6 +736,7 @@ export const apiKey = pgTable(
     createdBy: text('created_by').references(() => user.id, { onDelete: 'set null' }),
     name: text('name').notNull(),
     key: text('key').notNull().unique(),
+    keyHash: text('key_hash'),
     type: text('type').notNull().default('personal'),
     lastUsed: timestamp('last_used'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
@@ -747,6 +750,7 @@ export const apiKey = pgTable(
     ),
     workspaceTypeIdx: index('api_key_workspace_type_idx').on(table.workspaceId, table.type),
     userTypeIdx: index('api_key_user_type_idx').on(table.userId, table.type),
+    keyHashIdx: uniqueIndex('api_key_key_hash_idx').on(table.keyHash),
   })
 )
 
@@ -978,6 +982,11 @@ export const organization = pgTable('organization', {
     privacyUrl?: string
     hidePoweredBySim?: boolean
   }>(),
+  dataRetentionSettings: json('data_retention_settings').$type<{
+    logRetentionHours?: number | null
+    softDeleteRetentionHours?: number | null
+    taskCleanupHours?: number | null
+  }>(),
   orgUsageLimit: decimal('org_usage_limit'),
   storageUsedBytes: bigint('storage_used_bytes', { mode: 'number' }).notNull().default(0),
   departedMemberUsage: decimal('departed_member_usage').notNull().default('0'),
@@ -1009,6 +1018,13 @@ export const invitationKindEnum = pgEnum('invitation_kind', ['organization', 'wo
 
 export type InvitationKind = (typeof invitationKindEnum.enumValues)[number]
 
+export const invitationMembershipIntentEnum = pgEnum('invitation_membership_intent', [
+  'internal',
+  'external',
+])
+
+export type InvitationMembershipIntent = (typeof invitationMembershipIntentEnum.enumValues)[number]
+
 export const invitationStatusEnum = pgEnum('invitation_status', [
   'pending',
   'accepted',
@@ -1031,6 +1047,9 @@ export const invitation = pgTable(
     organizationId: text('organization_id').references(() => organization.id, {
       onDelete: 'cascade',
     }),
+    membershipIntent: invitationMembershipIntentEnum('membership_intent')
+      .notNull()
+      .default('internal'),
     role: text('role').notNull(),
     status: invitationStatusEnum('status').notNull().default('pending'),
     token: text('token').notNull().unique(),
@@ -1077,9 +1096,6 @@ export const workspace = pgTable(
     inboxEnabled: boolean('inbox_enabled').notNull().default(false),
     inboxAddress: text('inbox_address'),
     inboxProviderId: text('inbox_provider_id'),
-    logRetentionHours: integer('log_retention_hours'),
-    softDeleteRetentionHours: integer('soft_delete_retention_hours'),
-    taskCleanupHours: integer('task_cleanup_hours'),
     archivedAt: timestamp('archived_at'),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),
@@ -1134,6 +1150,7 @@ export const workspaceFiles = pgTable(
     size: integer('size').notNull(),
     deletedAt: timestamp('deleted_at'),
     uploadedAt: timestamp('uploaded_at').notNull().defaultNow(),
+    updatedAt: timestamp('updated_at').notNull().defaultNow(),
   },
   (table) => ({
     keyActiveUniqueIdx: uniqueIndex('workspace_files_key_active_unique')
@@ -2856,6 +2873,13 @@ export const userTableRows = pgTable(
       .notNull()
       .references(() => workspace.id, { onDelete: 'cascade' }),
     data: jsonb('data').notNull(),
+    /**
+     * Per-row workflow-group execution state, keyed by `WorkflowGroup.id`.
+     * Each entry holds status / executionId / jobId / blockErrors /
+     * runningBlockIds for one group's run on this row. Empty `{}` means no
+     * group has run for this row yet.
+     */
+    executions: jsonb('executions').notNull().default({}),
     position: integer('position').notNull().default(0),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     updatedAt: timestamp('updated_at').notNull().defaultNow(),

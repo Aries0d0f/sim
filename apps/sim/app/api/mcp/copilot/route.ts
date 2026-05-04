@@ -1,5 +1,5 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import {
   CallToolRequestSchema,
   type CallToolResult,
@@ -15,12 +15,15 @@ import { userStats } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
 import { generateId } from '@sim/utils/id'
+import { authorizeWorkflowByWorkspacePermission } from '@sim/workflow-authz'
 import { eq, sql } from 'drizzle-orm'
 import { type NextRequest, NextResponse } from 'next/server'
+import { mcpRequestBodySchema, mcpToolCallParamsSchema } from '@/lib/api/contracts/mcp'
 import { validateOAuthAccessToken } from '@/lib/auth/oauth-token'
 import { getHighestPrioritySubscription } from '@/lib/billing/core/subscription'
 import { generateWorkspaceContext } from '@/lib/copilot/chat/workspace-context'
 import { ORCHESTRATION_TIMEOUT_MS, SIM_AGENT_API_URL } from '@/lib/copilot/constants'
+import { createRequestId } from '@/lib/copilot/request/http'
 import { runHeadlessCopilotLifecycle } from '@/lib/copilot/request/lifecycle/headless'
 import { orchestrateSubagentStream } from '@/lib/copilot/request/subagent'
 import { ensureHandlersRegistered, executeTool } from '@/lib/copilot/tool-executor'
@@ -30,10 +33,7 @@ import { env } from '@/lib/core/config/env'
 import { RateLimiter } from '@/lib/core/rate-limiter'
 import { getBaseUrl } from '@/lib/core/utils/urls'
 import { withRouteHandler } from '@/lib/core/utils/with-route-handler'
-import {
-  authorizeWorkflowByWorkspacePermission,
-  resolveWorkflowIdForUser,
-} from '@/lib/workflows/utils'
+import { resolveWorkflowIdForUser } from '@/lib/workflows/utils'
 
 const logger = createLogger('CopilotMcpAPI')
 const mcpRateLimiter = new RateLimiter()
@@ -61,7 +61,8 @@ async function authenticateCopilotApiKey(apiKey: string): Promise<CopilotKeyAuth
       return { success: false, error: 'Server configuration error' }
     }
 
-    const res = await fetch(`${SIM_AGENT_API_URL}/api/validate-key`, {
+    const { fetchGo } = await import('@/lib/copilot/request/go/fetch')
+    const res = await fetchGo(`${SIM_AGENT_API_URL}/api/validate-key`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -69,6 +70,8 @@ async function authenticateCopilotApiKey(apiKey: string): Promise<CopilotKeyAuth
       },
       body: JSON.stringify({ targetApiKey: apiKey }),
       signal: AbortSignal.timeout(10_000),
+      spanName: 'sim → go /api/validate-key (mcp)',
+      operation: 'mcp_validate_key',
     })
 
     if (!res.ok) {
@@ -89,7 +92,10 @@ async function authenticateCopilotApiKey(apiKey: string): Promise<CopilotKeyAuth
         }
       }
 
-      return { success: false, error: String(upstream ?? 'Copilot API key validation failed') }
+      return {
+        success: false,
+        error: String(upstream ?? 'Copilot API key validation failed'),
+      }
     }
 
     const data = (await res.json()) as { ok?: boolean; userId?: string }
@@ -161,16 +167,6 @@ function createError(id: RequestId, code: ErrorCode | number, message: string): 
   }
 }
 
-function normalizeRequestHeaders(request: NextRequest): HeaderMap {
-  const headers: HeaderMap = {}
-
-  request.headers.forEach((value, key) => {
-    headers[key.toLowerCase()] = value
-  })
-
-  return headers
-}
-
 function readHeader(headers: HeaderMap | undefined, name: string): string | undefined {
   if (!headers) return undefined
   const value = headers[name.toLowerCase()]
@@ -178,190 +174,6 @@ function readHeader(headers: HeaderMap | undefined, name: string): string | unde
     return value[0]
   }
   return value
-}
-
-class NextResponseCapture {
-  private _status = 200
-  private _headers = new Headers()
-  private _controller: ReadableStreamDefaultController<Uint8Array> | null = null
-  private _pendingChunks: Uint8Array[] = []
-  private _closeHandlers: Array<() => void> = []
-  private _errorHandlers: Array<(error: Error) => void> = []
-  private _headersWritten = false
-  private _ended = false
-  private _headersPromise: Promise<void>
-  private _resolveHeaders: (() => void) | null = null
-  private _endedPromise: Promise<void>
-  private _resolveEnded: (() => void) | null = null
-  readonly readable: ReadableStream<Uint8Array>
-
-  constructor() {
-    this._headersPromise = new Promise<void>((resolve) => {
-      this._resolveHeaders = resolve
-    })
-
-    this._endedPromise = new Promise<void>((resolve) => {
-      this._resolveEnded = resolve
-    })
-
-    this.readable = new ReadableStream<Uint8Array>({
-      start: (controller) => {
-        this._controller = controller
-        if (this._pendingChunks.length > 0) {
-          for (const chunk of this._pendingChunks) {
-            controller.enqueue(chunk)
-          }
-          this._pendingChunks = []
-        }
-      },
-      cancel: () => {
-        this._ended = true
-        this._resolveEnded?.()
-        this.triggerCloseHandlers()
-      },
-    })
-  }
-
-  private markHeadersWritten(): void {
-    if (this._headersWritten) return
-    this._headersWritten = true
-    this._resolveHeaders?.()
-  }
-
-  private triggerCloseHandlers(): void {
-    for (const handler of this._closeHandlers) {
-      try {
-        handler()
-      } catch (error) {
-        this.triggerErrorHandlers(toError(error))
-      }
-    }
-  }
-
-  private triggerErrorHandlers(error: Error): void {
-    for (const errorHandler of this._errorHandlers) {
-      errorHandler(error)
-    }
-  }
-
-  private normalizeChunk(chunk: unknown): Uint8Array | null {
-    if (typeof chunk === 'string') {
-      return new TextEncoder().encode(chunk)
-    }
-
-    if (chunk instanceof Uint8Array) {
-      return chunk
-    }
-
-    if (chunk === undefined || chunk === null) {
-      return null
-    }
-
-    return new TextEncoder().encode(String(chunk))
-  }
-
-  writeHead(status: number, headers?: Record<string, string | number | string[]>): this {
-    this._status = status
-
-    if (headers) {
-      Object.entries(headers).forEach(([key, value]) => {
-        if (Array.isArray(value)) {
-          this._headers.set(key, value.join(', '))
-        } else {
-          this._headers.set(key, String(value))
-        }
-      })
-    }
-
-    this.markHeadersWritten()
-    return this
-  }
-
-  flushHeaders(): this {
-    this.markHeadersWritten()
-    return this
-  }
-
-  write(chunk: unknown): boolean {
-    const normalized = this.normalizeChunk(chunk)
-    if (!normalized) return true
-
-    this.markHeadersWritten()
-
-    if (this._controller) {
-      try {
-        this._controller.enqueue(normalized)
-      } catch (error) {
-        this.triggerErrorHandlers(toError(error))
-      }
-    } else {
-      this._pendingChunks.push(normalized)
-    }
-
-    return true
-  }
-
-  end(chunk?: unknown): this {
-    if (chunk !== undefined) this.write(chunk)
-    this.markHeadersWritten()
-    if (this._ended) return this
-
-    this._ended = true
-    this._resolveEnded?.()
-
-    if (this._controller) {
-      try {
-        this._controller.close()
-      } catch (error) {
-        this.triggerErrorHandlers(toError(error))
-      }
-    }
-
-    this.triggerCloseHandlers()
-
-    return this
-  }
-
-  async waitForHeaders(timeoutMs = 30000): Promise<void> {
-    if (this._headersWritten) return
-
-    await Promise.race([
-      this._headersPromise,
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, timeoutMs)
-      }),
-    ])
-  }
-
-  async waitForEnd(timeoutMs = 30000): Promise<void> {
-    if (this._ended) return
-
-    await Promise.race([
-      this._endedPromise,
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, timeoutMs)
-      }),
-    ])
-  }
-
-  on(event: 'close' | 'error', handler: (() => void) | ((error: Error) => void)): this {
-    if (event === 'close') {
-      this._closeHandlers.push(handler as () => void)
-    }
-
-    if (event === 'error') {
-      this._errorHandlers.push(handler as (error: Error) => void)
-    }
-
-    return this
-  }
-
-  toNextResponse(): NextResponse {
-    return new NextResponse(this.readable, {
-      status: this._status,
-      headers: this._headers,
-    })
-  }
 }
 
 function buildMcpServer(abortSignal?: AbortSignal): Server {
@@ -471,12 +283,11 @@ function buildMcpServer(abortSignal?: AbortSignal): Server {
       }
     }
 
-    const params = request.params as
-      | { name?: string; arguments?: Record<string, unknown> }
-      | undefined
-    if (!params?.name) {
+    const paramsValidation = mcpToolCallParamsSchema.safeParse(request.params)
+    if (!paramsValidation.success) {
       throw new McpError(ErrorCode.InvalidParams, 'Tool name required')
     }
+    const params = paramsValidation.data
 
     const result = await handleToolsCall(
       {
@@ -498,29 +309,17 @@ function buildMcpServer(abortSignal?: AbortSignal): Server {
 async function handleMcpRequestWithSdk(
   request: NextRequest,
   parsedBody: unknown
-): Promise<NextResponse> {
+): Promise<Response> {
   const server = buildMcpServer(request.signal)
-  const transport = new StreamableHTTPServerTransport({
+  const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
   })
 
-  const responseCapture = new NextResponseCapture()
-  const requestAdapter = {
-    method: request.method,
-    headers: normalizeRequestHeaders(request),
-  }
-
   await server.connect(transport)
 
   try {
-    await transport.handleRequest(requestAdapter as any, responseCapture as any, parsedBody)
-    await responseCapture.waitForHeaders()
-    // Must exceed the longest possible tool execution.
-    // Using ORCHESTRATION_TIMEOUT_MS + 60 s buffer so the orchestrator can
-    // finish or time-out on its own before the transport is torn down.
-    await responseCapture.waitForEnd(ORCHESTRATION_TIMEOUT_MS + 60_000)
-    return responseCapture.toNextResponse()
+    return await transport.handleRequest(request, { parsedBody })
   } finally {
     await server.close().catch(() => {})
     await transport.close().catch(() => {})
@@ -560,8 +359,25 @@ export const POST = withRouteHandler(async (request: NextRequest) => {
       })
     }
 
-    return await handleMcpRequestWithSdk(request, parsedBody)
+    const bodyValidation = mcpRequestBodySchema.safeParse(parsedBody)
+    if (!bodyValidation.success) {
+      return NextResponse.json(
+        createError(0, ErrorCode.InvalidRequest, 'Invalid JSON-RPC message'),
+        {
+          status: 400,
+        }
+      )
+    }
+
+    return await handleMcpRequestWithSdk(request, bodyValidation.data)
   } catch (error) {
+    if (request.signal.aborted || (error as Error)?.name === 'AbortError') {
+      return NextResponse.json(
+        createError(0, ErrorCode.ConnectionClosed, 'Client cancelled request'),
+        { status: 499 }
+      )
+    }
+
     logger.error('Error handling MCP request', { error })
     return NextResponse.json(createError(0, ErrorCode.InternalError, 'Internal error'), {
       status: 500,
@@ -696,7 +512,11 @@ async function handleBuildToolCall(
           resolvedWorkflowName = authorization.workflow?.name || undefined
           resolvedWorkspaceId = authorization.workflow?.workspaceId || undefined
           return authorization.allowed
-            ? { status: 'resolved' as const, workflowId, workflowName: resolvedWorkflowName }
+            ? {
+                status: 'resolved' as const,
+                workflowId,
+                workflowName: resolvedWorkflowName,
+              }
             : {
                 status: 'not_found' as const,
                 message: 'workflowId is required for build. Call create_workflow first.',
@@ -815,6 +635,7 @@ async function handleSubagentToolCall(
       (args.message as string) ||
       (args.error as string) ||
       JSON.stringify(args)
+    const simRequestId = createRequestId()
 
     const context = (args.context as Record<string, unknown>) || {}
     if (args.plan && !context.plan) {
@@ -836,6 +657,7 @@ async function handleSubagentToolCall(
         userId,
         workflowId: args.workflowId as string | undefined,
         workspaceId: args.workspaceId as string | undefined,
+        simRequestId,
         abortSignal,
       }
     )

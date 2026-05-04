@@ -22,7 +22,7 @@ vi.mock('@sim/db', () => ({
   db: mockDbChain,
 }))
 
-vi.mock('@/lib/audit/log', () => auditMock)
+vi.mock('@sim/audit', () => auditMock)
 
 vi.mock('@/lib/knowledge/service', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/knowledge/service')>()
@@ -285,7 +285,7 @@ describe('Knowledge Base By ID API Route', () => {
       const data = await response.json()
 
       expect(response.status).toBe(400)
-      expect(data.error).toBe('Invalid request data')
+      expect(data.error).toBe('Validation error')
       expect(data.details).toBeDefined()
     })
 

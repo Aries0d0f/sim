@@ -16,11 +16,29 @@ vi.mock('@/lib/copilot/request/http', () => copilotHttpMock)
 vi.mock('@/lib/copilot/constants', () => ({
   SIM_AGENT_API_URL_DEFAULT: 'https://agent.sim.example.com',
   SIM_AGENT_API_URL: 'https://agent.sim.example.com',
+  COPILOT_MODES: ['ask', 'build', 'plan'] as const,
+  COPILOT_REQUEST_MODES: ['ask', 'build', 'plan', 'agent'] as const,
 }))
 
 vi.mock('@/lib/core/config/env', () => createEnvMock({ COPILOT_API_KEY: 'test-api-key' }))
 
 import { POST } from '@/app/api/copilot/stats/route'
+
+// `fetchGo` reads `response.status` and `response.headers.get('content-length')`
+// to stamp span attributes, so mock responses need both fields or the call
+// path throws before the route handler sees the body.
+function buildMockResponse(init: {
+  ok: boolean
+  status?: number
+  json: () => Promise<unknown>
+}): Record<string, unknown> {
+  return {
+    ok: init.ok,
+    status: init.status ?? (init.ok ? 200 : 500),
+    headers: new Headers(),
+    json: init.json,
+  }
+}
 
 describe('Copilot Stats API Route', () => {
   beforeEach(() => {
@@ -58,10 +76,12 @@ describe('Copilot Stats API Route', () => {
         isAuthenticated: true,
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ success: true }),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: true,
+          json: () => Promise.resolve({ success: true }),
+        })
+      )
 
       const req = createMockRequest('POST', {
         messageId: 'message-123',
@@ -152,10 +172,12 @@ describe('Copilot Stats API Route', () => {
         isAuthenticated: true,
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        json: () => Promise.resolve({ error: 'Invalid message ID' }),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: false,
+          json: () => Promise.resolve({ error: 'Invalid message ID' }),
+        })
+      )
 
       const req = createMockRequest('POST', {
         messageId: 'invalid-message',
@@ -176,10 +198,12 @@ describe('Copilot Stats API Route', () => {
         isAuthenticated: true,
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        json: () => Promise.resolve({ message: 'Rate limit exceeded' }),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: false,
+          json: () => Promise.resolve({ message: 'Rate limit exceeded' }),
+        })
+      )
 
       const req = createMockRequest('POST', {
         messageId: 'message-123',
@@ -200,10 +224,12 @@ describe('Copilot Stats API Route', () => {
         isAuthenticated: true,
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: false,
-        json: () => Promise.reject(new Error('Not JSON')),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: false,
+          json: () => Promise.reject(new Error('Not JSON')),
+        })
+      )
 
       const req = createMockRequest('POST', {
         messageId: 'message-123',
@@ -266,10 +292,12 @@ describe('Copilot Stats API Route', () => {
         isAuthenticated: true,
       })
 
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ success: true }),
-      })
+      mockFetch.mockResolvedValueOnce(
+        buildMockResponse({
+          ok: true,
+          json: () => Promise.resolve({ success: true }),
+        })
+      )
 
       const req = createMockRequest('POST', {
         messageId: 'message-456',

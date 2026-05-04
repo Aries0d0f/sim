@@ -88,6 +88,7 @@ export interface PostHogEventMap {
   workspace_member_invited: {
     workspace_id: string
     invitee_role: string
+    membership_intent?: string
   }
 
   workspace_member_removed: {
@@ -403,6 +404,11 @@ export interface PostHogEventMap {
 
   task_deleted: {
     workspace_id: string
+  }
+
+  task_forked: {
+    workspace_id: string
+    source_chat_id: string
   }
 
   task_marked_unread: {

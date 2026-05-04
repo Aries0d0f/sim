@@ -1,7 +1,7 @@
-import { createHmac } from 'crypto'
 import { db } from '@sim/db'
 import { account, workspaceNotificationSubscription } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
+import { hmacSha256Hex } from '@sim/security/hmac'
 import { toError } from '@sim/utils/errors'
 import { generateId } from '@sim/utils/id'
 import { and, eq } from 'drizzle-orm'
@@ -11,6 +11,8 @@ import {
   type EmailUsageData,
   renderWorkflowNotificationEmail,
 } from '@/components/emails'
+import { notificationParamsSchema } from '@/lib/api/contracts/notifications'
+import { getValidationErrorMessage } from '@/lib/api/server'
 import { getSession } from '@/lib/auth'
 import { decryptSecret } from '@/lib/core/security/encryption'
 import { secureFetchWithValidation } from '@/lib/core/security/input-validation.server'
@@ -36,9 +38,7 @@ interface SlackConfig {
 
 function generateSignature(secret: string, timestamp: number, body: string): string {
   const signatureBase = `${timestamp}.${body}`
-  const hmac = createHmac('sha256', secret)
-  hmac.update(signatureBase)
-  return hmac.digest('hex')
+  return hmacSha256Hex(signatureBase, secret)
 }
 
 function buildTestPayload(subscription: typeof workspaceNotificationSubscription.$inferSelect) {
@@ -288,7 +288,14 @@ export const POST = withRouteHandler(async (request: NextRequest, { params }: Ro
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const { id: workspaceId, notificationId } = await params
+    const paramsResult = notificationParamsSchema.safeParse(await params)
+    if (!paramsResult.success) {
+      return NextResponse.json(
+        { error: getValidationErrorMessage(paramsResult.error, 'Invalid route parameters') },
+        { status: 400 }
+      )
+    }
+    const { id: workspaceId, notificationId } = paramsResult.data
     const permission = await getUserEntityPermissions(session.user.id, 'workspace', workspaceId)
 
     if (permission !== 'write' && permission !== 'admin') {

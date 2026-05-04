@@ -1,9 +1,12 @@
 import { db } from '@sim/db'
 import { workflowCheckpoints, workflow as workflowTable } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
+import { authorizeWorkflowByWorkspacePermission } from '@sim/workflow-authz'
 import { and, eq } from 'drizzle-orm'
 import { type NextRequest, NextResponse } from 'next/server'
-import { z } from 'zod'
+import { revertCopilotCheckpointContract } from '@/lib/api/contracts/copilot'
+import type { CleanedWorkflowState } from '@/lib/api/contracts/workflows'
+import { parseRequest } from '@/lib/api/server'
 import { getAccessibleCopilotChat } from '@/lib/copilot/chat/lifecycle'
 import {
   authenticateCopilotRequestSessionOnly,
@@ -14,14 +17,9 @@ import {
 } from '@/lib/copilot/request/http'
 import { getInternalApiBaseUrl } from '@/lib/core/utils/urls'
 import { withRouteHandler } from '@/lib/core/utils/with-route-handler'
-import { authorizeWorkflowByWorkspacePermission } from '@/lib/workflows/utils'
 import { isUuidV4 } from '@/executor/constants'
 
 const logger = createLogger('CheckpointRevertAPI')
-
-const RevertCheckpointSchema = z.object({
-  checkpointId: z.string().min(1),
-})
 
 /**
  * POST /api/copilot/checkpoints/revert
@@ -36,8 +34,16 @@ export const POST = withRouteHandler(async (request: NextRequest) => {
       return createUnauthorizedResponse()
     }
 
-    const body = await request.json()
-    const { checkpointId } = RevertCheckpointSchema.parse(body)
+    const parsed = await parseRequest(
+      revertCopilotCheckpointContract,
+      request,
+      {},
+      {
+        invalidJson: 'throw',
+      }
+    )
+    if (!parsed.success) return parsed.response
+    const { checkpointId } = parsed.data.body
 
     logger.info(`[${tracker.requestId}] Reverting to checkpoint ${checkpointId}`)
 
@@ -75,20 +81,31 @@ export const POST = withRouteHandler(async (request: NextRequest) => {
       return createUnauthorizedResponse()
     }
 
-    const checkpointState = checkpoint.workflowState as any // Cast to any for property access
+    const checkpointState: Record<string, unknown> =
+      checkpoint.workflowState && typeof checkpoint.workflowState === 'object'
+        ? (checkpoint.workflowState as Record<string, unknown>)
+        : {}
 
-    const cleanedState = {
-      blocks: checkpointState?.blocks || {},
-      edges: checkpointState?.edges || [],
-      loops: checkpointState?.loops || {},
-      parallels: checkpointState?.parallels || {},
-      isDeployed: checkpointState?.isDeployed || false,
+    const rawBlocks = checkpointState.blocks
+    const rawEdges = checkpointState.edges
+    const rawLoops = checkpointState.loops
+    const rawParallels = checkpointState.parallels
+    const rawDeployedAt = checkpointState.deployedAt
+
+    const parsedDeployedAt =
+      rawDeployedAt === null || rawDeployedAt === undefined
+        ? null
+        : new Date(rawDeployedAt as string | number | Date)
+
+    const cleanedState: CleanedWorkflowState = {
+      blocks: (rawBlocks ?? {}) as Record<string, unknown>,
+      edges: (rawEdges ?? []) as unknown[],
+      loops: (rawLoops ?? {}) as Record<string, unknown>,
+      parallels: (rawParallels ?? {}) as Record<string, unknown>,
+      isDeployed: Boolean(checkpointState.isDeployed),
       lastSaved: Date.now(),
-      ...(checkpointState?.deployedAt &&
-      checkpointState.deployedAt !== null &&
-      checkpointState.deployedAt !== undefined &&
-      !Number.isNaN(new Date(checkpointState.deployedAt).getTime())
-        ? { deployedAt: new Date(checkpointState.deployedAt) }
+      ...(parsedDeployedAt && !Number.isNaN(parsedDeployedAt.getTime())
+        ? { deployedAt: parsedDeployedAt }
         : {}),
     }
 

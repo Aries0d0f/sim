@@ -5,8 +5,9 @@
 import {
   databaseMock,
   hybridAuthMockFns,
+  posthogServerMock,
+  workflowAuthzMockFns,
   workflowsUtilsMock,
-  workflowsUtilsMockFns,
 } from '@sim/testing'
 import { NextRequest } from 'next/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -43,9 +44,7 @@ vi.mock('@/lib/workflows/executor/human-in-the-loop-manager', () => ({
 
 vi.mock('@/lib/workflows/utils', () => workflowsUtilsMock)
 
-vi.mock('@/lib/posthog/server', () => ({
-  captureServerEvent: vi.fn(),
-}))
+vi.mock('@/lib/posthog/server', () => posthogServerMock)
 
 vi.mock('@/lib/execution/event-buffer', () => ({
   setExecutionMeta: (...args: unknown[]) => mockSetExecutionMeta(...args),
@@ -68,7 +67,7 @@ describe('POST /api/workflows/[id]/executions/[executionId]/cancel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     hybridAuthMockFns.mockCheckHybridAuth.mockResolvedValue({ success: true, userId: 'user-1' })
-    workflowsUtilsMockFns.mockAuthorizeWorkflowByWorkspacePermission.mockResolvedValue({
+    workflowAuthzMockFns.mockAuthorizeWorkflowByWorkspacePermission.mockResolvedValue({
       allowed: true,
     })
     mockAbortManualExecution.mockReturnValue(false)
@@ -193,7 +192,7 @@ describe('POST /api/workflows/[id]/executions/[executionId]/cancel', () => {
 
   it('returns 403 when workflow access is denied', async () => {
     mockMarkExecutionCancelled.mockResolvedValue({ durablyRecorded: true, reason: 'recorded' })
-    workflowsUtilsMockFns.mockAuthorizeWorkflowByWorkspacePermission.mockResolvedValue({
+    workflowAuthzMockFns.mockAuthorizeWorkflowByWorkspacePermission.mockResolvedValue({
       allowed: false,
       message: 'Access denied',
       status: 403,
