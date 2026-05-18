@@ -1,4 +1,5 @@
 import { createLogger } from '@sim/logger'
+import { getErrorMessage } from '@sim/utils/errors'
 import { generateId } from '@sim/utils/id'
 import type { NextRequest } from 'next/server'
 import { NextResponse } from 'next/server'
@@ -206,7 +207,7 @@ export const POST = withRouteHandler(async (request: NextRequest) => {
       }
     } catch (error) {
       logger.error(`[${requestId}] TTS synthesis failed:`, error)
-      const errorMessage = error instanceof Error ? error.message : 'TTS synthesis failed'
+      const errorMessage = getErrorMessage(error, 'TTS synthesis failed')
       return NextResponse.json({ error: errorMessage }, { status: 500 })
     }
 
@@ -275,7 +276,7 @@ export const POST = withRouteHandler(async (request: NextRequest) => {
     return NextResponse.json(response)
   } catch (error) {
     logger.error(`[${requestId}] TTS unified proxy error:`, error)
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    const errorMessage = getErrorMessage(error, 'Unknown error')
     return NextResponse.json({ error: errorMessage }, { status: 500 })
   }
 })
@@ -657,6 +658,13 @@ async function synthesizeWithAzure(
 
   if (!text || !apiKey) {
     throw new Error('text and apiKey are required for Azure TTS')
+  }
+
+  const AZURE_REGION_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/
+  if (!AZURE_REGION_RE.test(region)) {
+    throw new Error(
+      'Invalid Azure region: must match /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/ (e.g. eastus, westeurope)'
+    )
   }
 
   let ssml = `<speak version='1.0' xml:lang='en-US' xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts"><voice name='${voiceId}'>`

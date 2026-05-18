@@ -143,12 +143,21 @@ export function Home({ chatId }: HomeProps = {}) {
     editQueuedMessage,
     previewSession,
     genericResourceData,
+    getCurrentRequestId,
   } = useChat(
     workspaceId,
     chatId,
     getMothershipUseChatOptions({
       onResourceEvent: handleResourceEvent,
       initialActiveResourceId: initialResourceId,
+      onRequestStarted: ({ requestId, userMessageId }) => {
+        captureEvent(posthogRef.current, 'task_request_started', {
+          workspace_id: workspaceId,
+          view: 'mothership',
+          request_id: requestId,
+          user_message_id: userMessageId,
+        })
+      },
     })
   )
 
@@ -198,6 +207,7 @@ export function Home({ chatId }: HomeProps = {}) {
     captureEvent(posthogRef.current, 'task_generation_aborted', {
       workspace_id: workspaceId,
       view: 'mothership',
+      request_id: getCurrentRequestId(),
     })
     void stopGeneration().catch(() => {})
   }
@@ -390,10 +400,10 @@ export function Home({ chatId }: HomeProps = {}) {
             size={null}
             type='button'
             onClick={() => setIsResourceCollapsed(false)}
-            className='h-[30px] w-[30px] rounded-[8px] hover-hover:bg-[var(--surface-active)]'
+            className='size-[30px] rounded-[8px] hover-hover:bg-[var(--surface-active)]'
             aria-label='Expand resource view'
           >
-            <PanelLeft className='h-[16px] w-[16px] text-[var(--text-icon)]' />
+            <PanelLeft className='size-[16px] text-[var(--text-icon)]' />
           </Button>
         </div>
       )}

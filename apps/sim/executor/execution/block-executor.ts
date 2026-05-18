@@ -1,7 +1,9 @@
 import { createLogger, type Logger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
 import { redactApiKeys } from '@/lib/core/security/redaction'
+import { normalizeStringArray } from '@/lib/core/utils/arrays'
 import { getBaseUrl } from '@/lib/core/utils/urls'
+import { compactExecutionPayload } from '@/lib/execution/payloads/serializer'
 import {
   containsUserFileWithMetadata,
   hydrateUserFilesWithBase64,
@@ -44,7 +46,11 @@ import {
 } from '@/executor/utils/iteration-context'
 import { isJSONString } from '@/executor/utils/json'
 import { filterOutputForLog } from '@/executor/utils/output-filter'
-import type { VariableResolver } from '@/executor/variables/resolver'
+import {
+  FUNCTION_BLOCK_CONTEXT_VARS_KEY,
+  FUNCTION_BLOCK_DISPLAY_CODE_KEY,
+  type VariableResolver,
+} from '@/executor/variables/resolver'
 import type { SerializedBlock } from '@/serializer/types'
 import { SYSTEM_SUBBLOCK_IDS } from '@/triggers/constants'
 
@@ -99,6 +105,7 @@ export class BlockExecutor {
     }
 
     let resolvedInputs: Record<string, any> = {}
+    let inputsForLog: Record<string, any> = {}
 
     const nodeMetadata = {
       ...this.buildNodeMetadata(node),
@@ -115,10 +122,32 @@ export class BlockExecutor {
         await validateBlockType(ctx.userId, ctx.workspaceId, blockType, ctx)
       }
 
-      resolvedInputs = this.resolver.resolveInputs(ctx, node.id, block.config.params, block)
+      if (block.metadata?.id === BlockType.FUNCTION) {
+        const {
+          resolvedInputs: fnInputs,
+          displayInputs,
+          contextVariables,
+        } = await this.resolver.resolveInputsForFunctionBlock(
+          ctx,
+          node.id,
+          block.config.params,
+          block
+        )
+        resolvedInputs = {
+          ...fnInputs,
+          [FUNCTION_BLOCK_CONTEXT_VARS_KEY]: contextVariables,
+          ...(displayInputs.code !== undefined
+            ? { [FUNCTION_BLOCK_DISPLAY_CODE_KEY]: displayInputs.code }
+            : {}),
+        }
+        inputsForLog = displayInputs
+      } else {
+        resolvedInputs = await this.resolver.resolveInputs(ctx, node.id, block.config.params, block)
+        inputsForLog = resolvedInputs
+      }
 
       if (blockLog) {
-        blockLog.input = this.sanitizeInputsForLog(resolvedInputs)
+        blockLog.input = this.sanitizeInputsForLog(inputsForLog)
       }
     } catch (error) {
       cleanupSelfReference?.()
@@ -129,7 +158,7 @@ export class BlockExecutor {
         block,
         startTime,
         blockLog,
-        resolvedInputs,
+        inputsForLog,
         isSentinel,
         'input_resolution'
       )
@@ -155,7 +184,7 @@ export class BlockExecutor {
             block,
             streamingExec,
             resolvedInputs,
-            ctx.selectedOutputs ?? []
+            normalizeStringArray(ctx.selectedOutputs)
           )
         }
 
@@ -166,13 +195,27 @@ export class BlockExecutor {
         normalizedOutput = this.normalizeOutput(output)
       }
 
-      if (containsUserFileWithMetadata(normalizedOutput)) {
+      if (ctx.includeFileBase64 === true && containsUserFileWithMetadata(normalizedOutput)) {
         normalizedOutput = (await hydrateUserFilesWithBase64(normalizedOutput, {
           requestId: ctx.metadata.requestId,
+          workspaceId: ctx.workspaceId,
+          workflowId: ctx.workflowId,
           executionId: ctx.executionId,
+          largeValueExecutionIds: ctx.largeValueExecutionIds,
+          allowLargeValueWorkflowScope: ctx.allowLargeValueWorkflowScope,
+          userId: ctx.userId,
           maxBytes: ctx.base64MaxBytes,
         })) as NormalizedBlockOutput
       }
+
+      normalizedOutput = (await compactExecutionPayload(normalizedOutput, {
+        workspaceId: ctx.workspaceId,
+        workflowId: ctx.workflowId,
+        executionId: ctx.executionId,
+        userId: ctx.userId,
+        preserveUserFileBase64: ctx.includeFileBase64 === true,
+        requireDurable: true,
+      })) as NormalizedBlockOutput
 
       const endedAt = new Date().toISOString()
       const duration = performance.now() - startTime
@@ -187,7 +230,8 @@ export class BlockExecutor {
         }
       }
 
-      this.state.setBlockOutput(node.id, normalizedOutput, duration)
+      const { childTraceSpans: _traces, ...outputForState } = normalizedOutput
+      this.state.setBlockOutput(node.id, outputForState as NormalizedBlockOutput, duration)
 
       if (!isSentinel && blockLog) {
         const childWorkflowInstanceId =
@@ -201,7 +245,7 @@ export class BlockExecutor {
           ctx,
           node,
           block,
-          this.sanitizeInputsForLog(resolvedInputs),
+          this.sanitizeInputsForLog(inputsForLog),
           displayOutput,
           duration,
           blockLog.startedAt,
@@ -211,7 +255,7 @@ export class BlockExecutor {
         )
       }
 
-      return normalizedOutput
+      return outputForState as NormalizedBlockOutput
     } catch (error) {
       return await this.handleBlockError(
         error,
@@ -220,7 +264,7 @@ export class BlockExecutor {
         block,
         startTime,
         blockLog,
-        resolvedInputs,
+        inputsForLog,
         isSentinel,
         'execution'
       )
@@ -251,26 +295,24 @@ export class BlockExecutor {
     block: SerializedBlock,
     startTime: number,
     blockLog: BlockLog | undefined,
-    resolvedInputs: Record<string, any>,
+    inputsForLog: Record<string, any>,
     isSentinel: boolean,
     phase: 'input_resolution' | 'execution'
   ): Promise<NormalizedBlockOutput> {
     const endedAt = new Date().toISOString()
     const duration = performance.now() - startTime
     const errorMessage = normalizeError(error)
-    const hasResolvedInputs =
-      resolvedInputs && typeof resolvedInputs === 'object' && Object.keys(resolvedInputs).length > 0
-    const input =
-      hasResolvedInputs && resolvedInputs
-        ? resolvedInputs
-        : ((block.config?.params as Record<string, any> | undefined) ?? {})
+    const hasLogInputs =
+      inputsForLog && typeof inputsForLog === 'object' && Object.keys(inputsForLog).length > 0
+    const input = hasLogInputs
+      ? inputsForLog
+      : ((block.config?.params as Record<string, any> | undefined) ?? {})
 
     const errorOutput: NormalizedBlockOutput = {
       error: errorMessage,
     }
 
     if (ChildWorkflowError.isChildWorkflowError(error)) {
-      errorOutput.childTraceSpans = error.childTraceSpans
       errorOutput.childWorkflowName = error.childWorkflowName
       if (error.childWorkflowSnapshotId) {
         errorOutput.childWorkflowSnapshotId = error.childWorkflowSnapshotId
@@ -287,8 +329,8 @@ export class BlockExecutor {
       blockLog.input = this.sanitizeInputsForLog(input)
       blockLog.output = filterOutputForLog(block.metadata?.id || '', errorOutput, { block })
 
-      if (errorOutput.childTraceSpans && Array.isArray(errorOutput.childTraceSpans)) {
-        blockLog.childTraceSpans = errorOutput.childTraceSpans
+      if (ChildWorkflowError.isChildWorkflowError(error) && error.childTraceSpans.length > 0) {
+        blockLog.childTraceSpans = error.childTraceSpans
       }
     }
 
@@ -428,7 +470,12 @@ export class BlockExecutor {
     const result: Record<string, any> = {}
 
     for (const [key, value] of Object.entries(inputs)) {
-      if (SYSTEM_SUBBLOCK_IDS.includes(key) || key === 'triggerMode') {
+      if (
+        SYSTEM_SUBBLOCK_IDS.includes(key) ||
+        key === 'triggerMode' ||
+        key === FUNCTION_BLOCK_CONTEXT_VARS_KEY ||
+        key === FUNCTION_BLOCK_DISPLAY_CODE_KEY
+      ) {
         continue
       }
 

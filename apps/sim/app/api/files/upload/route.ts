@@ -1,4 +1,5 @@
 import { createLogger } from '@sim/logger'
+import { getErrorMessage } from '@sim/utils/errors'
 import { type NextRequest, NextResponse } from 'next/server'
 import { sanitizeFileName } from '@/executor/constants'
 import '@/lib/uploads/core/setup.server'
@@ -15,11 +16,8 @@ import type { StorageContext } from '@/lib/uploads/config'
 import { generateWorkspaceFileKey } from '@/lib/uploads/contexts/workspace/workspace-file-manager'
 import { isImageFileType, resolveFileType } from '@/lib/uploads/utils/file-utils'
 import {
-  SUPPORTED_AUDIO_EXTENSIONS,
-  SUPPORTED_CODE_EXTENSIONS,
-  SUPPORTED_DOCUMENT_EXTENSIONS,
+  SUPPORTED_ATTACHMENT_EXTENSIONS,
   SUPPORTED_IMAGE_EXTENSIONS,
-  SUPPORTED_VIDEO_EXTENSIONS,
   validateFileType,
 } from '@/lib/uploads/utils/validation'
 import { getUserEntityPermissions } from '@/lib/workspaces/permissions/utils'
@@ -29,13 +27,7 @@ import {
   InvalidRequestError,
 } from '@/app/api/files/utils'
 
-const ALLOWED_EXTENSIONS = new Set<string>([
-  ...SUPPORTED_DOCUMENT_EXTENSIONS,
-  ...SUPPORTED_CODE_EXTENSIONS,
-  ...SUPPORTED_IMAGE_EXTENSIONS,
-  ...SUPPORTED_AUDIO_EXTENSIONS,
-  ...SUPPORTED_VIDEO_EXTENSIONS,
-])
+const ALLOWED_EXTENSIONS = new Set<string>(SUPPORTED_ATTACHMENT_EXTENSIONS)
 
 function validateFileExtension(filename: string): boolean {
   const extension = filename.split('.').pop()?.toLowerCase()
@@ -227,8 +219,7 @@ export const POST = withRouteHandler(async (request: NextRequest) => {
           uploadResults.push(userFile)
           continue
         } catch (workspaceError) {
-          const errorMessage =
-            workspaceError instanceof Error ? workspaceError.message : 'Upload failed'
+          const errorMessage = getErrorMessage(workspaceError, 'Upload failed')
           const isDuplicate = errorMessage.includes('already exists')
           const isStorageLimitError =
             errorMessage.includes('Storage limit exceeded') ||

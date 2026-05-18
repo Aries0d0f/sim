@@ -1,4 +1,5 @@
 import { createLogger } from '@sim/logger'
+import { getErrorMessage } from '@sim/utils/errors'
 import { type NextRequest, NextResponse } from 'next/server'
 import { docusignToolContract } from '@/lib/api/contracts/tools/docusign'
 import { getValidationErrorMessage, parseRequest } from '@/lib/api/server'
@@ -7,6 +8,7 @@ import { withRouteHandler } from '@/lib/core/utils/with-route-handler'
 import { FileInputSchema } from '@/lib/uploads/utils/file-schemas'
 import { processFilesToUserFiles, type RawFileInput } from '@/lib/uploads/utils/file-utils'
 import { downloadFileFromStorage } from '@/lib/uploads/utils/file-utils.server'
+import { assertToolFileAccess } from '@/app/api/files/authorization'
 
 const logger = createLogger('DocuSignAPI')
 
@@ -54,7 +56,7 @@ async function resolveAccount(accessToken: string): Promise<DocuSignAccountInfo>
 
 export const POST = withRouteHandler(async (request: NextRequest) => {
   const authResult = await checkInternalAuth(request, { requireWorkflowId: false })
-  if (!authResult.success) {
+  if (!authResult.success || !authResult.userId) {
     return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
   }
 
@@ -84,7 +86,7 @@ export const POST = withRouteHandler(async (request: NextRequest) => {
 
     switch (operation) {
       case 'send_envelope':
-        return await handleSendEnvelope(apiBase, headers, params)
+        return await handleSendEnvelope(apiBase, headers, params, authResult.userId)
       case 'create_from_template':
         return await handleCreateFromTemplate(apiBase, headers, params)
       case 'get_envelope':
@@ -107,7 +109,7 @@ export const POST = withRouteHandler(async (request: NextRequest) => {
     }
   } catch (error) {
     logger.error('DocuSign API error', { operation, error })
-    const message = error instanceof Error ? error.message : 'Internal server error'
+    const message = getErrorMessage(error, 'Internal server error')
     return NextResponse.json({ success: false, error: message }, { status: 500 })
   }
 })
@@ -115,7 +117,8 @@ export const POST = withRouteHandler(async (request: NextRequest) => {
 async function handleSendEnvelope(
   apiBase: string,
   headers: Record<string, string>,
-  params: Record<string, unknown>
+  params: Record<string, unknown>,
+  userId: string
 ) {
   const { signerEmail, signerName, emailSubject, emailBody, ccEmail, ccName, file, status } = params
 
@@ -135,6 +138,8 @@ async function handleSendEnvelope(
       const userFiles = processFilesToUserFiles([parsed as RawFileInput], 'docusign-send', logger)
       if (userFiles.length > 0) {
         const userFile = userFiles[0]
+        const denied = await assertToolFileAccess(userFile.key, userId, 'docusign-send', logger)
+        if (denied) return denied
         const buffer = await downloadFileFromStorage(userFile, 'docusign-send', logger)
         documentBase64 = buffer.toString('base64')
         documentName = userFile.name

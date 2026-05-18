@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { createLogger } from '@sim/logger'
+import { getErrorMessage } from '@sim/utils/errors'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiClientError } from '@/lib/api/client/errors'
 import { requestJson } from '@/lib/api/client/request'
@@ -19,12 +20,12 @@ import {
   updateMcpServerContract,
 } from '@/lib/api/contracts/mcp'
 import { sanitizeForHttp, sanitizeHeaders } from '@/lib/mcp/shared'
-import type { McpServerStatusConfig, McpTool, McpTransport, StoredMcpTool } from '@/lib/mcp/types'
+import type { McpTool, McpTransport, StoredMcpTool } from '@/lib/mcp/types'
 import { workflowMcpServerKeys } from '@/hooks/queries/workflow-mcp-servers'
 
 const logger = createLogger('McpQueries')
 
-export type { McpServerStatusConfig, McpTool, StoredMcpTool }
+export type { McpTool, StoredMcpTool }
 
 export const mcpKeys = {
   all: ['mcp'] as const,
@@ -39,7 +40,7 @@ export type { McpServer }
 /**
  * Input for creating/updating an MCP server (distinct from McpServerConfig in types.ts)
  */
-export interface McpServerInput {
+interface McpServerInput {
   name: string
   transport: McpTransport
   url?: string
@@ -436,7 +437,7 @@ export function useMcpServerTest() {
       logger.info(`MCP server test ${result.success ? 'passed' : 'failed'}:`, variables.name)
     },
     onError: (error) => {
-      logger.error('MCP server test failed:', error instanceof Error ? error.message : error)
+      logger.error('MCP server test failed:', getErrorMessage(error))
     },
   })
 
@@ -447,8 +448,7 @@ export function useMcpServerTest() {
         ? ({
             success: false,
             message: 'Connection failed',
-            error:
-              mutation.error instanceof Error ? mutation.error.message : 'Unknown error occurred',
+            error: getErrorMessage(mutation.error, 'Unknown error occurred'),
           } as McpServerTestResult)
         : null),
     isTestingConnection: mutation.isPending,

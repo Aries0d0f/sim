@@ -33,6 +33,8 @@ export interface LoopPauseScope {
   iteration: number
 }
 
+export type PauseKind = 'human' | 'time'
+
 export interface PauseMetadata {
   contextId: string
   blockId: string
@@ -47,6 +49,9 @@ export interface PauseMetadata {
     executionId: string
     workflowId: string
   }
+  pauseKind: PauseKind
+  /** ISO timestamp at which a `pauseKind: 'time'` pause becomes due for automatic resume. */
+  resumeAt?: string
 }
 
 export type ResumeStatus = 'paused' | 'resumed' | 'failed' | 'queued' | 'resuming'
@@ -67,6 +72,8 @@ export interface PausePoint {
     executionId: string
     workflowId: string
   }
+  pauseKind: PauseKind
+  resumeAt?: string
 }
 
 export interface SerializedSnapshot {
@@ -119,7 +126,7 @@ export interface ProviderTimingSegment {
 }
 
 /** Timing info reported by an LLM provider for a single block execution. */
-export interface BlockProviderTiming {
+interface BlockProviderTiming {
   startTime: string
   endTime: string
   duration: number
@@ -131,7 +138,7 @@ export interface BlockProviderTiming {
 }
 
 /** Cost breakdown from provider usage. */
-export interface BlockCost {
+interface BlockCost {
   input: number
   output: number
   total: number
@@ -173,7 +180,7 @@ export interface BlockToolCall {
 }
 
 /** Normalized tool-call container emitted by providers. */
-export interface BlockToolCalls {
+interface BlockToolCalls {
   list: BlockToolCall[]
   count: number
 }
@@ -206,6 +213,15 @@ export interface NormalizedBlockOutput {
   _pauseMetadata?: PauseMetadata
 }
 
+export const EXECUTION_CONTROL_OUTPUT_FIELD_NAMES = [
+  'error',
+  'selectedOption',
+  'selectedRoute',
+  '_pauseMetadata',
+] as const
+
+export type ExecutionControlOutputFieldName = (typeof EXECUTION_CONTROL_OUTPUT_FIELD_NAMES)[number]
+
 export interface BlockLog {
   blockId: string
   blockName?: string
@@ -237,7 +253,7 @@ export interface BlockLog {
   childTraceSpans?: TraceSpan[]
 }
 
-export interface ExecutionMetadata {
+interface ExecutionMetadata {
   requestId?: string
   workflowId?: string
   workspaceId?: string
@@ -261,6 +277,7 @@ export interface ExecutionMetadata {
   triggerBlockId?: string
   useDraftState?: boolean
   resumeFromSnapshot?: boolean
+  resumeTerminalNoop?: boolean
 }
 
 export interface BlockState {
@@ -273,6 +290,8 @@ export interface ExecutionContext {
   workflowId: string
   workspaceId?: string
   executionId?: string
+  largeValueExecutionIds?: string[]
+  allowLargeValueWorkflowScope?: boolean
   userId?: string
   isDeployedContext?: boolean
   enforceCredentialAccess?: boolean
@@ -327,6 +346,10 @@ export interface ExecutionContext {
     {
       parallelId: string
       totalBranches: number
+      batchSize?: number
+      currentBatchStart?: number
+      currentBatchSize?: number
+      accumulatedOutputs?: Map<number, any[]>
       branchOutputs: Map<number, any[]>
       parallelType?: 'count' | 'collection'
       items?: any[]
@@ -378,8 +401,9 @@ export interface ExecutionContext {
     blockId: string,
     childWorkflowInstanceId: string,
     iterationContext?: IterationContext,
-    executionOrder?: number
-  ) => void
+    executionOrder?: number,
+    childWorkflowContext?: ChildWorkflowContext
+  ) => Promise<void>
 
   /**
    * AbortSignal for cancellation support.
@@ -466,7 +490,7 @@ export interface StreamingExecution {
   onFullContent?: (content: string) => void | Promise<void>
 }
 
-export interface BlockExecutor {
+interface BlockExecutor {
   canExecute(block: SerializedBlock): boolean
 
   execute(
@@ -502,7 +526,7 @@ export interface BlockHandler {
   ) => Promise<BlockOutput | StreamingExecution>
 }
 
-export interface Tool<P = any, O = Record<string, any>> {
+interface Tool<P = any, O = Record<string, any>> {
   id: string
   name: string
   description: string
@@ -531,7 +555,7 @@ export interface Tool<P = any, O = Record<string, any>> {
   }>
 }
 
-export interface ToolRegistry {
+interface ToolRegistry {
   [key: string]: Tool
 }
 

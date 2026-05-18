@@ -1,5 +1,10 @@
 import { generateId } from '@sim/utils/id'
 import {
+  mergeAndRedactPersistedBlocks,
+  redactSensitiveContent,
+  redactToolCallResult,
+} from '@/lib/copilot/chat/sim-key-redaction'
+import {
   MothershipStreamV1CompletionStatus,
   MothershipStreamV1EventType,
   MothershipStreamV1SpanLifecycleEvent,
@@ -17,7 +22,7 @@ import type {
 
 export type PersistedToolState = LocalToolCallStatus | MothershipStreamV1ToolOutcome
 
-export interface PersistedToolCall {
+interface PersistedToolCall {
   id: string
   name: string
   state: PersistedToolState
@@ -52,7 +57,7 @@ export interface PersistedFileAttachment {
   size: number
 }
 
-export interface PersistedMessageContext {
+interface PersistedMessageContext {
   kind: string
   label: string
   workflowId?: string
@@ -164,11 +169,13 @@ function mapContentBlockBody(block: ContentBlock): PersistedContentBlock {
         state === 'pending' ||
         state === 'executing'
 
+      const redactedResult = redactToolCallResult(block.toolCall.name, block.toolCall.result)
+
       const toolCall: PersistedToolCall = {
         id: block.toolCall.id,
         name: block.toolCall.name,
         state,
-        ...(isSubagentTool && isNonTerminal ? {} : { result: block.toolCall.result }),
+        ...(isSubagentTool && isNonTerminal ? {} : { result: redactedResult }),
         ...(isSubagentTool && isNonTerminal
           ? {}
           : block.toolCall.params
@@ -202,7 +209,7 @@ export function buildPersistedAssistantMessage(
   const message: PersistedMessage = {
     id: generateId(),
     role: 'assistant',
-    content: result.content,
+    content: redactSensitiveContent(result.content),
     timestamp: new Date().toISOString(),
   }
 
@@ -211,7 +218,7 @@ export function buildPersistedAssistantMessage(
   }
 
   if (result.contentBlocks.length > 0) {
-    message.contentBlocks = result.contentBlocks.map(mapContentBlock)
+    message.contentBlocks = mergeAndRedactPersistedBlocks(result.contentBlocks.map(mapContentBlock))
   }
 
   return message

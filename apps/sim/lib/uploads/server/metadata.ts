@@ -17,11 +17,12 @@ export interface FileMetadataInsertOptions {
   originalName: string
   contentType: string
   size: number
+  folderId?: string | null
   /** Optional — a UUID is generated when omitted. */
   id?: string
 }
 
-export interface FileMetadataQueryOptions {
+interface FileMetadataQueryOptions {
   context?: StorageContext
   workspaceId?: string
   userId?: string
@@ -34,7 +35,8 @@ export interface FileMetadataQueryOptions {
 export async function insertFileMetadata(
   options: FileMetadataInsertOptions
 ): Promise<FileMetadataRecord> {
-  const { key, userId, workspaceId, context, originalName, contentType, size, id } = options
+  const { key, userId, workspaceId, context, originalName, contentType, size, folderId, id } =
+    options
 
   const existingDeleted = await db
     .select()
@@ -48,8 +50,10 @@ export async function insertFileMetadata(
       .set({
         userId,
         workspaceId: workspaceId || null,
+        folderId: folderId ?? null,
         context,
         originalName,
+        displayName: originalName,
         contentType,
         size,
         deletedAt: null,
@@ -83,8 +87,10 @@ export async function insertFileMetadata(
         key,
         userId,
         workspaceId: workspaceId || null,
+        folderId: folderId ?? null,
         context,
         originalName,
+        displayName: originalName,
         contentType,
         size,
         deletedAt: null,
@@ -161,7 +167,7 @@ export async function getFileMetadataById(
 /**
  * Get file metadata by context with optional workspaceId/userId filters
  */
-export async function getFileMetadataByContext(
+async function getFileMetadataByContext(
   context: StorageContext,
   options?: FileMetadataQueryOptions & { includeDeleted?: boolean }
 ): Promise<FileMetadataRecord[]> {
